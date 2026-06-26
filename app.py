@@ -1,0 +1,1452 @@
+"""
+River FOB Values — portal interface.
+
+Renders each commodity as a faithful replica of the JSA FOB Sheet block:
+date banner, green commodity banner, month/contract header rows, CBOT and CIF
+rows, then each river reach with its freight row (shown as % of tariff) and the
+FOB barge rows beneath it (2 decimals, negatives in red parentheses).
+
+Inputs (shared barge freight; per-commodity CIF and CBOT futures) are editable
+in the "Edit today's inputs" expander; the sheet recalculates live.
+History archiving to Postgres is a separate milestone.
+"""
+import base64
+import datetime as dt
+import os
+import io
+
+import altair as alt
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+import fob_model as M
+import seed_data as S
+import db
+import paste_parse
+
+st.set_page_config(
+    page_title="River FOB Values · JPSI",
+    page_icon="https://www.jpsi.com/wp-content/uploads/2019/04/cropped-Favicon-1-192x192.png",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+@st.cache_resource
+def _ensure_db():
+    # Allow DATABASE_URL via Streamlit secrets (falls back to local SQLite).
+    try:
+        if "DATABASE_URL" in st.secrets:
+            os.environ["DATABASE_URL"] = st.secrets["DATABASE_URL"]
+    except Exception:
+        pass
+    db.init_db()
+    return db.backend_name()
+
+
+DB_BACKEND = _ensure_db()
+
+
+def _safe(v):
+    """Float or None (drops NaN) — used when persisting inputs."""
+    try:
+        return None if v is None or pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+@st.cache_data
+def _watermark_uri():
+    p = os.path.join(os.path.dirname(__file__), "assets", "jsa_50yr.png")
+    try:
+        with open(p, "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    except OSError:
+        return ""
+
+
+WATERMARK = _watermark_uri()
+
+# --- JPSI brand + smoothed sheet styling ----------------------------------
+JPSI_DARK = "#32373c"
+JPSI_BLUE = "#0693e3"
+NEG_RED = "#d64545"       # softer than pure red
+
+# per-commodity banner gradient (start, end)
+COMMODITY_THEME = {
+    "Corn":     ("#f4b41a", "#e09600"),   # golden
+    "Soybeans": ("#5da34d", "#3e7d33"),   # green
+    "Wheat":    ("#cda94a", "#a9772b"),   # wheat tan
+}
+
+st.markdown(
+    f"""
+    <style>
+      /* JPSI site typography: Source Sans Pro body + EB Garamond serif headings */
+      @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&family=EB+Garamond:wght@400;500;600&display=swap');
+      html, body, [class*="css"], .stApp, button, input, select, textarea, table, td, th, .stMarkdown {{
+        font-family: 'Source Sans Pro', system-ui, -apple-system, sans-serif !important;
+      }}
+      table td, table th {{ font-variant-numeric: tabular-nums; }}
+      .jpsi-serif {{ font-family: 'EB Garamond', Georgia, 'Times New Roman', serif !important; }}
+
+      /* Hide Streamlit's fixed header and menu */
+      header[data-testid="stHeader"] {{ display: none !important; }}
+      #MainMenu {{ visibility: hidden !important; }}
+      footer {{ visibility: hidden !important; }}
+
+      /* Main layout */
+      .block-container {{ padding-top: 0.75rem !important; padding-bottom: 1rem !important; max-width: 1200px; }}
+      .stApp {{ background-color: #ffffff; }}
+
+      /* Header banner */
+      .header-banner {{
+        background: #ffffff;
+        border-bottom: 3px solid {JPSI_BLUE};
+        padding: 24px 0;
+        margin: -0.75rem 0 24px 0;
+      }}
+      .header-banner h1 {{
+        margin: 0 0 4px 0;
+        font-size: 2rem;
+        color: {JPSI_DARK};
+        font-weight: 700;
+        letter-spacing: -0.5px;
+      }}
+      .header-banner .subtitle {{
+        color: #666;
+        font-size: 0.95rem;
+        font-weight: 400;
+        margin: 0;
+      }}
+
+      /* Page title styling */
+      .fob-title {{
+        background: {JPSI_DARK}; border-left: 6px solid {JPSI_BLUE};
+        padding: 12px 20px; border-radius: 10px; margin-bottom: 16px;
+      }}
+      .fob-title h1 {{ margin: 0; font-size: 1.5rem; color: #ffffff; }}
+      .fob-title span {{ color: {JPSI_BLUE}; font-weight: 600; }}
+
+      /* Data tables */
+      .sheet-wrap {{
+        border-radius: 10px; overflow: hidden; position: relative;
+        box-shadow: 0 2px 8px rgba(50,55,60,0.12);
+        border: 1px solid #ddd;
+        background: #fff; margin-bottom: 16px;
+      }}
+      .sheet-wrap::after {{
+        content: ""; position: absolute; inset: 0;
+        background: url('{WATERMARK}') center 46% / 38% auto no-repeat;
+        opacity: 0.06; pointer-events: none; z-index: 5;
+      }}
+
+      /* Table styling */
+      .sheet {{
+        width: 100%; border-collapse: collapse; font-size: 0.85rem;
+      }}
+      .sheet tr.cmdty {{ background: linear-gradient(135deg, {JPSI_BLUE} 0%, #0573b8 100%); }}
+      .sheet tr.cmdty td {{
+        color: #ffffff; font-weight: 700; padding: 10px 16px; text-align: left;
+      }}
+      .sheet tr.hdr.months {{
+        background: {JPSI_DARK}; color: #ffffff; font-weight: 600;
+      }}
+      .sheet tr.hdr.months td {{
+        padding: 8px 10px; text-align: center; font-size: 0.8rem;
+        border-right: 1px solid rgba(255,255,255,0.15); color: #ffffff;
+      }}
+      .sheet tr.section td {{
+        background: #f0f0f0; color: {JPSI_DARK}; font-weight: 700;
+        padding: 8px 16px; border-top: 1px solid #ddd; font-size: 0.8rem;
+        text-transform: uppercase; letter-spacing: 0.3px; text-align: left;
+      }}
+      .sheet tr.cash-section td {{
+        background: linear-gradient(135deg, {JPSI_BLUE} 0%, #0573b8 100%);
+        color: #ffffff; font-weight: 700;
+        padding: 10px 16px; border-top: 1px solid #ddd; font-size: 0.85rem;
+        text-align: center; letter-spacing: 0.5px;
+      }}
+      .sheet tr.strong td {{
+        padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #f5f5f5;
+        color: #1f2328;
+      }}
+      .sheet tr.frt-row td {{
+        padding: 8px 10px; color: #333; border-bottom: 1px solid #f5f5f5;
+        font-style: italic; font-weight: 500;
+      }}
+      .sheet td.lbl {{
+        font-weight: 600; color: #2c3e50; width: auto; min-width: 110px;
+        padding-left: 12px; text-align: left;
+      }}
+      .sheet td {{
+        padding: 8px 10px; text-align: right; border-right: 1px solid #f5f5f5;
+        color: #333; font-weight: 500;
+      }}
+      .sheet td.up {{
+        background-color: #e8f5e9; color: #0d7f3d; font-weight: 700;
+      }}
+      .sheet td.down {{
+        background-color: #ffebee; color: #c00000; font-weight: 700;
+      }}
+      .sheet .chg {{
+        display: block; font-weight: 600; color: #333;
+      }}
+      .sheet .chg span {{
+        font-size: 0.7rem; font-weight: 500; opacity: 0.9;
+      }}
+      /* Charts */
+      .vega-embed {{
+        position: relative; background: #ffffff; border-radius: 10px;
+        padding: 12px; box-shadow: 0 2px 8px rgba(50,55,60,0.12);
+        border: 1px solid #e0e0e0;
+      }}
+      .vega-embed::before {{
+        content: ""; position: absolute; inset: 0;
+        background: url('{WATERMARK}') center 48% / 30% auto no-repeat;
+        opacity: 0.11; pointer-events: none; z-index: 0;
+      }}
+      .vega-embed canvas, .vega-embed svg, .vega-embed .marks {{
+        position: relative; z-index: 1;
+      }}
+
+      /* Streamlit elements */
+      h1 {{
+        color: {JPSI_DARK} !important;
+      }}
+      h2 {{
+        color: {JPSI_DARK} !important; border-bottom: 3px solid {JPSI_BLUE};
+        padding-bottom: 8px; margin-top: 24px; margin-bottom: 16px;
+      }}
+      h3, h4 {{
+        color: {JPSI_DARK} !important; margin-top: 20px; margin-bottom: 12px;
+        font-weight: 700;
+      }}
+      .stMarkdown {{
+        color: #2c3e50 !important;
+      }}
+      label {{
+        color: {JPSI_DARK} !important;
+        font-weight: 600 !important;
+      }}
+
+      /* Buttons — JPSI blue */
+      .stButton > button {{
+        background: {JPSI_BLUE};
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+      }}
+      .stButton > button:hover {{
+        background: #057ec2;
+        color: #fff;
+      }}
+      .stDownloadButton > button {{
+        background-color: {JPSI_BLUE} !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 6px !important;
+        padding: 8px 16px !important;
+        font-weight: 600 !important;
+      }}
+      .stDownloadButton > button:hover {{
+        background-color: #057ec2 !important;
+      }}
+
+      /* Sidebar — light subtle brand tint (matching Basis Tracker) */
+      section[data-testid="stSidebar"] {{
+        background: #f6f8fa;
+        border-right: 1px solid #e6eaee;
+      }}
+      section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] h2 {{
+        color: {JPSI_DARK};
+      }}
+      .stSidebar label {{
+        color: {JPSI_DARK} !important;
+      }}
+
+      /* Tabs — JPSI blue active indicator */
+      .stTabs [data-baseweb="tab-list"] {{
+        gap: 0;
+        background: #ffffff;
+        border-bottom: 1px solid #e2e8f0;
+      }}
+      .stTabs [data-baseweb="tab"] {{
+        color: #5b6470;
+        font-size: 13px;
+        padding: 8px 18px;
+        font-weight: 600;
+        border-radius: 0;
+      }}
+      .stTabs [aria-selected="true"] {{
+        color: {JPSI_BLUE} !important;
+        font-weight: 700 !important;
+        border-bottom: 3px solid {JPSI_BLUE} !important;
+      }}
+      .stTabs [data-baseweb="tab-panel"] {{
+        padding-top: 8px !important;
+      }}
+
+      /* Text in main area */
+      body, .stMarkdown {{
+        color: #333;
+      }}
+
+      /* Input form styling */
+      .stTextArea textarea {{
+        color: #1f2328 !important;
+      }}
+      .stNumberInput input {{
+        color: #1f2328 !important;
+      }}
+      .stSelectbox select {{
+        color: #1f2328 !important;
+      }}
+      .stDateInput input {{
+        color: #1f2328 !important;
+      }}
+      .stButton > button {{
+        color: #fff !important;
+      }}
+
+      /* Expander styling */
+      .stExpander {{
+        border: 1px solid #ddd !important;
+      }}
+      .stExpander > summary {{
+        color: {JPSI_DARK} !important;
+        font-weight: 600 !important;
+      }}
+
+      /* Caption and status text */
+      .stCaption {{
+        color: #666 !important;
+      }}
+
+      /* DataFrame/table text */
+      .stDataFrame {{
+        color: #333 !important;
+      }}
+
+      /* Caption and metadata */
+      .caption {{
+        color: #666; font-size: 0.85rem; font-style: italic;
+        margin-top: 8px;
+      }}
+
+      /* Additional table styling */
+      td.datebar {{
+        text-align: center !important; font-weight: 600;
+        font-size: 0.82rem; letter-spacing: .04em; text-transform: uppercase;
+        color: #7a828b; background: #fff; padding: 8px;
+      }}
+      td.cmdty {{
+        text-align: center !important; font-weight: 700; color: #fff;
+        font-size: 1.15rem; letter-spacing: .06em; padding: 9px;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.18);
+      }}
+      tr.reach td {{
+        text-align: center !important; font-weight: 700;
+        font-size: 0.7rem; letter-spacing: .08em; text-transform: uppercase;
+        background: #f1f3f5; padding-top: 7px; padding-bottom: 7px;
+      }}
+      table.sheet tr.spread td {{ font-weight: 600; }}
+      table.sheet td.slabel {{
+        text-align: right; color: #6b7280;
+        font-style: italic; font-weight: 600;
+      }}
+      table.sheet tbody tr:hover td {{ background: #eef6fd; }}
+      table.sheet tr.band td {{ background: #fafbfc; }}
+      table.sheet tr:last-child td {{ border-bottom: none; }}
+
+      /* Darker text for expanders and warnings */
+      [data-testid="stExpander"] summary {{
+        color: {JPSI_DARK} !important;
+        font-weight: 600 !important;
+      }}
+      [data-testid="stExpander"] {{
+        color: {JPSI_DARK} !important;
+      }}
+      [data-testid="stAlert"] {{
+        color: {JPSI_DARK} !important;
+      }}
+      [data-testid="stAlert"] div {{
+        color: {JPSI_DARK} !important;
+      }}
+      [data-testid="stAlert"] p {{
+        color: {JPSI_DARK} !important;
+      }}
+    </style>
+    """, unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="header-banner">'
+    '<h1>🏢 River FOB Values Portal</h1>'
+    '<div class="subtitle">John Stewart &amp; Associates • Agricultural Market Intelligence</div>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+# --- session state seed ----------------------------------------------------
+def _init_state():
+    if "freight" not in st.session_state:
+        st.session_state.freight = pd.DataFrame(
+            {m: [S.SEED_FREIGHT[r][i] for r in M.FREIGHT_REGIONS]
+                 for i, m in enumerate(M.MONTHS)},
+            index=M.FREIGHT_REGIONS,
+        )
+    for c in M.COMMODITIES:
+        if f"cif_{c}" not in st.session_state:
+            st.session_state[f"cif_{c}"] = pd.DataFrame(
+                {"CIF": S.SEED_CIF[c], "Futures": S.SEED_FUTURES[c]},
+                index=M.MONTHS,
+            )
+        if f"carry_{c}" not in st.session_state:
+            st.session_state[f"carry_{c}"] = pd.DataFrame(
+                {lbl: [S.SEED_SPREADS[c][i]]
+                 for i, lbl in enumerate(M.CARRY_CONFIG[c]["spread_labels"])},
+                index=["Spread"],
+            )
+        if f"cashc_{c}" not in st.session_state:
+            st.session_state[f"cashc_{c}"] = S.SEED_CASH_C[c]
+        if f"storage_{c}" not in st.session_state:
+            st.session_state[f"storage_{c}"] = S.SEED_STORAGE_MO[c]
+    if "interest_pct" not in st.session_state:
+        st.session_state.interest_pct = S.SEED_INTEREST_PCT
+    if "editor_ver" not in st.session_state:
+        st.session_state.editor_ver = 0
+
+
+_init_state()
+
+
+def _bump_editors():
+    """Force input editors to re-read session state after a programmatic load."""
+    st.session_state.editor_ver += 1
+
+
+# Apply a date parsed from a pasted freight table (must run before the widget).
+if "pending_as_of" in st.session_state:
+    st.session_state["as_of_input"] = st.session_state.pop("pending_as_of")
+
+# --- sidebar ---------------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        '<div style="text-align: center; padding: 16px; border-bottom: 3px solid #0693e3; margin: -1rem -1rem 20px -1rem; background: rgba(6,147,227,0.08);">'
+        '<div style="font-weight: 900; font-size: 1.4rem; color: #0693e3; letter-spacing: 1px; margin-bottom: 4px;">JSA</div>'
+        '<h3 style="margin: 0; color: #32373c; font-size: 0.95rem; font-weight: 600;">River FOB Portal</h3>'
+        '<small style="color: #666; font-size: 0.8rem;">Market Intelligence</small>'
+        '</div>',
+        unsafe_allow_html=True
+    )
+    st.subheader("Snapshot")
+    as_of = st.date_input(
+        "As-of date", value=dt.date.today(), key="as_of_input",
+        help="The date the inputs represent and will save under. Can be a "
+             "future date when prepping the next sheet. Auto-set when you "
+             "paste a dated freight table.")
+    st.caption(
+        "Enter CIF & barge freight on the **📝 Inputs** tab — the commodity tabs "
+        "update live. That's a *what-if* until you hit **Save**, which archives "
+        "the snapshot for this date.")
+    st.markdown("**Full-carry assumptions**")
+    st.session_state.interest_pct = st.number_input(
+        "Annual interest rate (%)", value=float(st.session_state.interest_pct),
+        step=0.25, format="%.2f",
+        help="Used for % Full Carry; storage is per-commodity on the Inputs tab.")
+
+    st.divider()
+    st.subheader("Archive")
+    st.caption(f"CIF + barge freight · {DB_BACKEND}")
+    view_choice = st.selectbox(
+        "View archived date", ["✏️ Working (live)"] + db.list_dates(),
+        help="Pick a saved date to view its FOB sheet read-only. Choose "
+             "'Working (live)' to edit on the Inputs tab.")
+    if st.button("↺ Reset inputs to seed"):
+        for k in list(st.session_state.keys()):
+            if k.startswith(("freight", "cif_", "carry_", "cashc_", "storage_")):
+                del st.session_state[k]
+        _init_state()
+        _bump_editors()
+        st.rerun()
+
+HIST_DATE = None if view_choice.startswith("✏️") else view_choice
+
+
+# --- formatting helpers ----------------------------------------------------
+def _num(v, dec):
+    return "" if v is None or pd.isna(v) else f"{v:.{dec}f}"
+
+
+def _pct(v):
+    return "" if v is None or pd.isna(v) else f"{v * 100:.0f}%"
+
+
+def _fob_cell(v):
+    if v is None or pd.isna(v):
+        return "<td></td>"
+    if v < 0:
+        return f'<td class="neg">({abs(v):.2f})</td>'
+    return f"<td>{v:.2f}</td>"
+
+
+def _spread_cell(v):
+    if v is None or pd.isna(v):
+        return "<td></td>"
+    if v < 0:
+        return f'<td class="neg">({abs(v):.4f})</td>'
+    return f"<td>{v:.4f}</td>"
+
+
+def _carry_pct_cell(v):
+    if v is None or pd.isna(v):
+        return "<td></td>"
+    cls = ' class="neg"' if v < 0 else ""
+    return f"<td{cls}>{v * 100:.0f}%</td>"
+
+
+def _dir_cls(cur, prior):
+    """Green 'up' / red 'down' / '' based on change vs the prior day."""
+    try:
+        if cur is None or prior is None or pd.isna(cur) or pd.isna(prior):
+            return ""
+    except TypeError:
+        return ""
+    return "up" if cur > prior else "down" if cur < prior else ""
+
+
+def _dir_td(cur, prior, kind):
+    """A data cell coloured by day-over-day direction. kind: cif|pct|fob."""
+    cls = _dir_cls(cur, prior)
+    if cur is None or pd.isna(cur):
+        return "<td></td>"
+    if kind == "pct":
+        txt = f"{cur * 100:.0f}%"
+    elif kind == "fob":
+        txt = f"({abs(cur):.2f})" if cur < 0 else f"{cur:.2f}"
+    else:  # cif
+        txt = f"{cur:.2f}"
+    return f'<td class="{cls}">{txt}</td>' if cls else f"<td>{txt}</td>"
+
+
+def _data_row(label, vals, fmt, band, lbl_cls="lbl", row_cls=""):
+    cells = "".join(f"<td>{fmt(v)}</td>" for v in vals)
+    cls = (" band" if band else "") + (f" {row_cls}" if row_cls else "")
+    return f'<tr class="{cls.strip()}"><td class="{lbl_cls}">{label}</td>{cells}</tr>'
+
+
+def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
+                 spreads, fullcarry, cash_c, historical=False, contracts=None,
+                 months=None, prior=None):
+    """Render one commodity as a smoothed spreadsheet-style HTML block.
+
+    months: the column keys to render (defaults to the live MONTHS). Archived
+    dates pass their own stored months so older sheets show their real columns.
+    When historical=True only the archived/recomputable rows are shown
+    (CIF, FOB by reach, Cash vs Delivery) — CBOT and the carry section are
+    omitted because futures/spreads aren't stored in the archive.
+    """
+    months = months or M.MONTHS
+    ncol = len(months) + 1
+    c0, c1 = COMMODITY_THEME[commodity]
+    banner = f"background:linear-gradient(135deg,{c0},{c1});"
+    reach_style = f"color:{c1};box-shadow:inset 3px 0 0 {c1};"
+    rows = []
+    rows.append(f'<tr><td class="datebar" colspan="{ncol}">{as_of:%A, %B %d, %Y}</td></tr>')
+    rows.append(f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{commodity}</td></tr>')
+    # month + contract header rows (contract month is archived per column)
+    contracts = contracts or M.CONTRACTS[commodity]
+    rows.append('<tr class="hdr months"><td class="lbl"></td>' +
+                "".join(f"<td>{m}</td>" for m in months) + "</tr>")
+    rows.append('<tr class="hdr"><td class="lbl"></td>' +
+                "".join(f"<td>{c or ''}</td>" for c in contracts) + "</tr>")
+    prior = prior or {}
+    if not historical:
+        # CBOT (4dp, banded) — futures prices aren't archived, so live-only
+        rows.append(_data_row("CBOT", [fut_row[m] for m in months],
+                              lambda v: _num(v, 4), band=True))
+    p_cif = prior.get("cif", {})
+    cif_cells = "".join(_dir_td(cif_row.get(m), p_cif.get(m), "cif") for m in months)
+    rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cif_cells}</tr>')
+
+    grid = M.compute_fob_grid(commodity, cif_row, freight_by_region, months)
+    p_grid = prior.get("grid", {})
+    p_frt = prior.get("freight", {})
+
+    # Cash vs Delivery section (before river reaches)
+    cfg = M.CARRY_CONFIG[commodity]
+    rows.append(f'<tr class="cash-section"><td colspan="{ncol}">Cash vs Delivery</td></tr>')
+    cash = dict(zip(months,
+                    M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cash_c, months)))
+    p_cash = prior.get("cash", {})
+    cash_cells = "".join(_dir_td(cash[m], p_cash.get(m), "fob") for m in months)
+    rows.append(f'<tr class="strong"><td class="lbl">{cfg["cash_label"]}</td>'
+                f'{cash_cells}</tr>')
+
+    # Spreads / Carry section (after Cash vs Delivery, before river reaches)
+    if not historical:
+        # Spreads row: labels in Aug/Oct/Dec columns, values in Sep/Nov/Jan
+        labels = cfg["spread_labels"]
+        scells = ["<td></td>", "<td></td>"]  # June, July
+        for i in range(3):
+            scells.append(f'<td class="slabel">{labels[i]}</td>')
+            scells.append(_spread_cell(spreads[i]))
+        rows.append('<tr class="spread"><td class="lbl">Spreads</td>'
+                    + "".join(scells) + "</tr>")
+
+        # % Full Carry: values under Sep / Nov / Jan
+        carry = M.pct_full_carry(spreads, fullcarry)
+        ccells = ["<td></td>"] * 3  # June, July, Aug
+        for i in range(3):
+            ccells.append(_carry_pct_cell(carry[i]))   # Sep, Nov, Jan
+            if i < 2:
+                ccells.append("<td></td>")             # Oct, Dec
+        rows.append('<tr class="spread"><td class="lbl">% Full Carry</td>'
+                    + "".join(ccells) + "</tr>")
+
+    band = True
+    for item in M.BLOCK_LAYOUT:
+        if item[0] == "reach":
+            rows.append(f'<tr class="reach"><td colspan="{ncol}" '
+                        f'style="{reach_style}">{item[1]}</td></tr>')
+            band = True
+            continue
+        if item[0] == "freight":
+            _, region, label = item
+            fr = freight_by_region.get(region, {})
+            pf = p_frt.get(region, {})
+            cells = "".join(_dir_td(fr.get(m), pf.get(m), "pct") for m in months)
+            rows.append(f'<tr class="frt-row{" band" if band else ""}">'
+                        f'<td class="lbl">{label}</td>{cells}</tr>')
+        else:  # fob
+            loc = item[1]
+            pg = p_grid.get(loc, {})
+            cells = "".join(_dir_td(grid[loc][m], pg.get(m), "fob") for m in months)
+            rows.append(f'<tr class="{"band" if band else ""}">'
+                        f'<td class="lbl">FOB Barge {loc}</td>{cells}</tr>')
+        band = not band
+
+    # Top Carry rows at the bottom (above the chart)
+    if not historical:
+        rows.append(f'<tr class="section"><td colspan="{ncol}">Top of Carry</td></tr>')
+        for label, loc in cfg["top_carry"]:
+            tc = M.top_carry(commodity, grid[loc], spreads)
+            rows.append(f'<tr><td class="lbl">{label}</td>'
+                        + "".join(_fob_cell(v) for v in tc) + "</tr>")
+
+    return f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>'
+
+
+CHART_LABEL = {"Corn": "Corn", "Soybeans": "Beans", "Wheat": "SRW"}
+
+
+def render_carry_chart(commodity, grid, spreads, months=None):
+    """Top-of-carry (cash forward curve on spot futures) for a chosen location."""
+    months = months or M.MONTHS
+    locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
+    default = locs.index("STL") if "STL" in locs else 0
+    loc = st.selectbox(
+        "Location", locs, index=default, key=f"carry_chart_loc_{commodity}",
+        help="Top-of-carry curve for this location, anchored at its spot basis "
+             "(the first month) and carried out on spot futures.")
+    tc = M.top_carry(commodity, grid[loc], spreads)
+    data = [{"Month": m, "Carry": float(v)} for m, v in zip(months, tc)
+            if v is not None and not pd.isna(v)]
+    if not data:
+        st.info("No carry data for this selection.")
+        return
+    df = pd.DataFrame(data)
+    title = f"Cash Fwd Curve {CHART_LABEL[commodity]} (Basis Spot Futures): {loc}"
+    base = alt.Chart(df).encode(
+        x=alt.X("Month:N", sort=months, title=None,
+                axis=alt.Axis(labelColor="#1f4e79", labelFontWeight="bold",
+                              labelFontSize=12, labelAngle=0)),
+        y=alt.Y("Carry:Q", title=None, axis=alt.Axis(format=".2f")))
+    line = base.mark_line(color="#1f4e79", strokeWidth=3,
+                          point=alt.OverlayMarkDef(color="#1f4e79", size=45))
+    labels = base.mark_text(dy=-13, color="#c00000", fontWeight="bold",
+                            fontSize=12).encode(text=alt.Text("Carry:Q", format=".2f"))
+    chart = alt.layer(line, labels).properties(
+        height=340, background="transparent",
+        title=alt.TitleParams(title, color="#c00000", fontSize=17,
+                              fontWeight="bold", anchor="middle"),
+    ).configure_view(strokeWidth=0, fill=None).configure_axis(
+        grid=True, gridColor="#e6e6e6", domainColor="#cccccc")
+    # Watermark sits behind the chart via CSS (see .vega-embed::before); the
+    # chart itself stays clean.
+    st.altair_chart(chart, use_container_width=True)
+
+
+# Marketing-year start month per commodity (corn/soy Sep, wheat Jun).
+SEASON_START = {"Corn": 9, "Soybeans": 9, "Wheat": 6}
+MONTH_NUM = {"June": 6, "July": 7, "Aug": 8, "Sep": 9,
+             "Oct": 10, "Nov": 11, "Dec": 12, "Jan": 1}
+
+# Map any stored month label (abbrev or full, across import eras) -> month #.
+_MNUM = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+         "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+         "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+         "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+
+
+def _month_num(label):
+    """Canonical month number for a stored column label, or None for
+    spot/half-month/garbage labels (TW, NW, Spot, FH/LH ..., numeric)."""
+    s = str(label).strip().lower().rstrip(".")
+    if s[:2] in ("fh", "lh") or s in ("tw", "nw", "spot", ""):
+        return None
+    return _MNUM.get(s)
+
+
+@st.cache_data(show_spinner=False)
+def seasonal_frame(commodity, metric, location, delivery, _sig):
+    """One row per archived date with the chosen value, a group label, and a
+    synthetic 'season_date' for overlay plotting.
+
+    - delivery == "Nearby": front column, grouped by marketing year, mapped onto
+      a Sep->Aug (or Jun->May) span.
+    - delivery == a month: that delivery column, grouped by the actual delivery
+      CONTRACT (e.g. "Dec 2025"), with the x-axis anchored to the delivery month
+      so each contract's life overlays continuously — Jan extends past year-end.
+    """
+    cif, frt, cal = db.fetch_all()
+    start = SEASON_START[commodity]
+    D = MONTH_NUM.get(delivery) if delivery != "Nearby" else None
+    rows = []
+    for d, by_comm in cif.items():
+        cmcif = by_comm.get(commodity)
+        if not cmcif:
+            continue
+        cols = cal.get(d, {}).get(commodity)
+        months = [m for m, _ in cols] if cols else list(cmcif.keys())
+        # choose the column: nearby = Spot/first real month; else match by month #
+        if D is None:
+            col = next((k for k in months if str(k).strip().lower() == "spot"), None)
+            if col is None:
+                col = next((k for k in months if _month_num(k) is not None), None)
+        else:
+            col = next((k for k in cmcif if _month_num(k) == D), None)
+        if col is None:
+            continue
+        if metric == "CIF NOLA":
+            val = cmcif.get(col)
+        else:
+            grid = M.compute_fob_grid(commodity, cmcif, frt.get(d, {}), [col])
+            val = grid.get(location, {}).get(col)
+        if val is None:
+            continue
+        dd = dt.date.fromisoformat(d)
+        if D is None:  # Nearby -> marketing year
+            sy = dd.year if dd.month >= start else dd.year - 1
+            group, sort_key = f"{sy}/{(sy + 1) % 100:02d}", sy
+            syn_year = 2001 if dd.month >= start else 2002
+            try:
+                syn = dt.date(syn_year, dd.month, dd.day)
+            except ValueError:
+                syn = dt.date(syn_year, dd.month, 28)
+        else:  # specific delivery -> follow the contract to its delivery month
+            cy = dd.year if D >= dd.month else dd.year + 1
+            group, sort_key = f"{delivery} {cy}", cy
+            try:
+                deliv = dt.date(cy, D, 1)
+            except ValueError:
+                continue
+            syn = dt.date(2002, D, 1) - (deliv - dd)  # anchor delivery at 2002-D
+        rows.append({"date": dd, "season_date": syn, "group": group,
+                     "value": float(val), "sort": sort_key})
+    return pd.DataFrame(rows)
+
+
+def render_seasonal_tab():
+    st.markdown("### 📈 Seasonal — Basis by Marketing Year")
+    c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.1])
+    with c1:
+        commodity = st.selectbox("Commodity", M.COMMODITIES, key="seasonal_commodity")
+    with c2:
+        metric = st.radio("Series", ["FOB at location", "CIF NOLA"],
+                          key="seasonal_metric")
+    location = "STL"
+    with c3:
+        if metric == "FOB at location":
+            locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
+            location = st.selectbox("Location", locs,
+                                    index=locs.index("STL") if "STL" in locs else 0,
+                                    key="seasonal_location")
+        else:
+            st.caption("CIF NOLA export basis — no location.")
+    with c4:
+        delivery = st.selectbox("Delivery", ["Nearby"] + M.MONTHS,
+                                key="seasonal_delivery",
+                                help="Nearby = front of the curve, or pick a "
+                                     "specific delivery month (e.g. Dec).")
+
+    dates = db.list_dates()
+    sig = (len(dates), dates[0] if dates else "")
+    metric_key = "CIF NOLA" if metric == "CIF NOLA" else "FOB"
+    df = seasonal_frame(commodity, metric_key, location, delivery, sig)
+    if df.empty:
+        st.info("No archived data for this selection yet.")
+        return
+
+    order = df.drop_duplicates("group").sort_values("sort")["group"].tolist()
+    cur_group = order[-1]
+    df = df.assign(Current=df["group"] == cur_group)
+    start = SEASON_START[commodity]
+    label = "CIF NOLA" if metric == "CIF NOLA" else f"FOB {location}"
+    title = f"{CHART_LABEL[commodity]} Seasonal — {delivery} {label} Basis"
+    legend_title = "Mktg Yr" if delivery == "Nearby" else "Contract"
+
+    # 5-year (or fewer) average of completed groups, binned by season week
+    completed = order[:-1][-5:]
+    avg = pd.DataFrame()
+    if completed:
+        hist = df[df["group"].isin(completed)].copy()
+        hist["wk"] = hist["season_date"].map(
+            lambda d: d.isocalendar()[0] * 100 + d.isocalendar()[1])
+        avg = (hist.groupby("wk")
+               .agg(value=("value", "mean"), season_date=("season_date", "min"))
+               .reset_index().sort_values("season_date"))
+
+    hover = alt.selection_point(fields=["group"], on="pointerover", nearest=True,
+                                empty=True)
+    yaxis = alt.Axis(format=".2f", labelColor="#1f4e79", labelFontWeight="bold",
+                     labelFontSize=12)
+    xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
+                     labelFontWeight="bold")
+    year_lines = alt.Chart(df).mark_line(point=False).encode(
+        x=alt.X("season_date:T", title=None, axis=xaxis),
+        y=alt.Y("value:Q", title=None, axis=yaxis),
+        color=alt.Color("group:N", title=legend_title, sort=order,
+                        scale=alt.Scale(scheme="tableau10")),
+        size=alt.condition("datum.Current", alt.value(4.5), alt.value(2)),
+        opacity=alt.condition(hover, alt.value(1.0), alt.value(0.2)),
+        tooltip=[alt.Tooltip("group:N", title=legend_title),
+                 alt.Tooltip("date:T", title="Date"),
+                 alt.Tooltip("value:Q", format=".2f", title="Basis")],
+    ).add_params(hover)
+
+    layers = [year_lines]
+    if not avg.empty:
+        avg_line = alt.Chart(avg.assign(lbl=f"{len(completed)}-Yr Avg")).mark_line(
+            color="#111111", strokeWidth=3, strokeDash=[7, 4]).encode(
+            x="season_date:T", y="value:Q",
+            tooltip=[alt.Tooltip("lbl:N", title="Series"),
+                     alt.Tooltip("value:Q", format=".2f", title="Avg")])
+        layers.append(avg_line)
+
+    chart = alt.layer(*layers).properties(
+        height=400, background="transparent",
+        title=alt.TitleParams(title, color="#c00000", fontSize=17,
+                              fontWeight="bold", anchor="middle"),
+    ).configure_view(strokeWidth=0, fill=None).configure_axis(
+        grid=True, gridColor="#e6e6e6", domainColor="#cccccc"
+    ).configure_legend(titleColor="#1f4e79", labelColor="#333", labelFontWeight="bold")
+    st.altair_chart(chart, use_container_width=True)
+    if delivery == "Nearby":
+        basis = (f"Nearby (front of curve) · marketing year starts "
+                 f"{'September' if start == 9 else 'June'} 1")
+    else:
+        basis = (f"{delivery} delivery contract · followed from when it appears "
+                 f"until it expires (Jan runs past year-end)")
+    st.caption(f"{basis} · current ({cur_group}) drawn heavier · black dashed = "
+               f"{len(completed)}-yr avg · hover a line to isolate · "
+               f"{len(df)} points / {df['group'].nunique()} contracts.")
+
+
+def _chg_cell(cur, prior, kind):
+    """Cell showing the current value plus its signed change, colored by direction."""
+    if cur is None or pd.isna(cur):
+        return "<td></td>"
+    val = f"{cur * 100:.0f}%" if kind == "pct" else f"{cur:.2f}"
+    if prior is None or pd.isna(prior):
+        return f"<td>{val}</td>"
+    d = cur - prior
+    if abs(d) < 1e-9:
+        return f"<td>{val}</td>"
+    cls = "up" if d > 0 else "down"
+    delta = f"{d * 100:+.0f}%" if kind == "pct" else f"{d:+.2f}"
+    color = "#0d7f3d" if d > 0 else "#c00000"
+    return f'<td class="{cls}" style="color: {color};">{val}<span class="chg" style="color: {color};"> {delta}</span></td>'
+
+
+def _build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt):
+    """Build a DataFrame for daily changes (for PNG export)."""
+    rows = []
+    for c in M.COMMODITIES:
+        row_vals = []
+        for m in M.MONTHS:
+            cur = cur_cif[c].get(m)
+            prior = (d_cif.get(c) or {}).get(m)
+            if cur is None:
+                row_vals.append("")
+            elif prior is None:
+                row_vals.append(f"{cur:.2f}")
+            else:
+                delta = cur - prior
+                sign = "+" if delta > 1e-9 else ""
+                row_vals.append(f"{cur:.2f}\n{sign}{delta:.2f}")
+        rows.append([c, "CIF"] + row_vals)
+
+    for r in M.FREIGHT_REGIONS:
+        row_vals = []
+        for m in M.MONTHS:
+            cur = cur_frt[r].get(m)
+            prior = (d_frt.get(r) or {}).get(m)
+            if cur is None:
+                row_vals.append("")
+            elif prior is None:
+                row_vals.append(f"{cur*100:.1f}%")
+            else:
+                delta = cur - prior
+                sign = "+" if delta > 1e-9 else ""
+                row_vals.append(f"{cur*100:.1f}%\n{sign}{delta*100:.1f}%")
+        rows.append([r, "Barge"] + row_vals)
+
+    cols = ["Region/Commodity", "Type"] + M.MONTHS
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt):
+    """Build a DataFrame for weekly changes (for PNG export)."""
+    rows = []
+
+    # STL Freight at the top
+    row_vals = []
+    for m in M.MONTHS:
+        cur = cur_frt["STL"].get(m)
+        prior = (w_frt.get("STL") or {}).get(m)
+        if cur is None:
+            row_vals.append("")
+        elif prior is None:
+            row_vals.append(f"{cur*100:.1f}%")
+        else:
+            delta = cur - prior
+            sign = "+" if delta > 1e-9 else ""
+            row_vals.append(f"{cur*100:.1f}%\n{sign}{delta*100:.1f}%")
+    rows.append(["STL Freight", "—"] + row_vals)
+
+    # CIF and FOB by commodity
+    for c in M.COMMODITIES:
+        cur_fob = M.compute_fob_grid(c, cur_cif[c], cur_frt)["STL"]
+        w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
+                 if w_cif.get(c) else {})
+
+        # CIF row
+        row_vals = []
+        for m in M.MONTHS:
+            cur = cur_cif[c].get(m)
+            prior = (w_cif.get(c) or {}).get(m)
+            if cur is None:
+                row_vals.append("")
+            elif prior is None:
+                row_vals.append(f"{cur:.2f}")
+            else:
+                delta = cur - prior
+                sign = "+" if delta > 1e-9 else ""
+                row_vals.append(f"{cur:.2f}\n{sign}{delta:.2f}")
+        rows.append([c, "CIF"] + row_vals)
+
+        # FOB row
+        row_vals = []
+        for m in M.MONTHS:
+            cur = cur_fob.get(m)
+            prior = w_fob.get(m)
+            if cur is None:
+                row_vals.append("")
+            elif prior is None:
+                row_vals.append(f"{cur:.2f}")
+            else:
+                delta = cur - prior
+                sign = "+" if delta > 1e-9 else ""
+                row_vals.append(f"{cur:.2f}\n{sign}{delta:.2f}")
+        rows.append([c, "FOB"] + row_vals)
+
+    cols = ["Commodity", "Series"] + M.MONTHS
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _df_to_png(df, title):
+    """Convert DataFrame to PNG using Plotly with JPSI branding."""
+    # Alternate row colors for better readability
+    cell_colors = []
+    for col in df.columns:
+        col_colors = []
+        for i in range(len(df)):
+            if i == 0:
+                col_colors.append("#f0f2f5")
+            else:
+                col_colors.append("#ffffff" if i % 2 == 1 else "#f9f9f9")
+        cell_colors.append(col_colors)
+
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=list(df.columns),
+            fill_color="#32373c",
+            align="left",
+            font=dict(color="white", size=12, family="Arial, sans-serif"),
+            height=28,
+            line=dict(color="#0693e3", width=2)
+        ),
+        cells=dict(
+            values=[df[col] for col in df.columns],
+            fill_color=cell_colors,
+            align="left",
+            font=dict(size=10, family="Arial, sans-serif", color="#333"),
+            height=26,
+            line=dict(color="#e0e0e0", width=0.5)
+        )
+    )])
+
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title}</b><br><sub>John Stewart &amp; Associates • River FOB Values</sub>",
+            font=dict(size=18, family="Arial, sans-serif", color="#32373c"),
+            x=0.5,
+            xanchor="center"
+        ),
+        height=max(450, len(df) * 32 + 140),
+        margin=dict(l=30, r=30, t=100, b=30),
+        paper_bgcolor="white",
+        plot_bgcolor="white"
+    )
+
+    try:
+        img_bytes = fig.to_image(format="png", scale=2)
+        return img_bytes
+    except Exception as e:
+        return None
+
+
+def render_changes_tab(as_of):
+    cur_cif, cur_frt, _ = _current_payloads()
+    dates = sorted(db.list_dates())
+    before = [d for d in dates if d < as_of.isoformat()]
+    pdaily = before[-1] if before else None
+    pweek = None
+    if before:
+        tgt = as_of - dt.timedelta(days=7)
+        pweek = min(before, key=lambda d: abs((dt.date.fromisoformat(d) - tgt).days))
+    d_cif, d_frt, _ = db.load_snapshot(pdaily) if pdaily else (None, None, None)
+    w_cif, w_frt, _ = db.load_snapshot(pweek) if pweek else (None, None, None)
+    d_cif, d_frt = d_cif or {}, d_frt or {}
+    w_cif, w_frt = w_cif or {}, w_frt or {}
+    ncol = len(M.MONTHS) + 1
+    banner = "background:linear-gradient(135deg,#0693e3,#32373c)"
+
+    def hdr(title):
+        return (f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{title}'
+                f'</td></tr><tr class="hdr months"><td class="lbl"></td>'
+                + "".join(f"<td>{m}</td>" for m in M.MONTHS) + "</tr>")
+
+    # --- Daily: CIF + barge freight, vs prior day ---
+    st.markdown("#### Daily Changes")
+    col1, col2 = st.columns([0.9, 0.1])
+    with col2:
+        daily_df = _build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt)
+        daily_png = _df_to_png(daily_df, "Daily Changes")
+        if daily_png:
+            st.download_button(
+                label="📥 PNG",
+                data=daily_png,
+                file_name=f"daily_changes_{as_of.isoformat()}.png",
+                mime="image/png"
+            )
+
+    rows = [hdr("Daily Changes")]
+    rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
+    for c in M.COMMODITIES:
+        cells = "".join(_chg_cell(cur_cif[c].get(m), (d_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">{c}</td>{cells}</tr>')
+    rows.append(f'<tr class="section"><td colspan="{ncol}">Barge Freight</td></tr>')
+    for r in M.FREIGHT_REGIONS:
+        cells = "".join(_chg_cell(cur_frt[r].get(m), (d_frt.get(r) or {}).get(m), "pct")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
+    st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
+    st.caption(f"Day-over-day: working values vs prior archived date "
+               f"({pdaily or 'none'}).")
+
+    # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
+    st.markdown("#### Weekly Changes")
+    col1, col2 = st.columns([0.9, 0.1])
+    with col2:
+        weekly_df = _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt)
+        weekly_png = _df_to_png(weekly_df, "Weekly Changes")
+        if weekly_png:
+            st.download_button(
+                label="📥 PNG",
+                data=weekly_png,
+                file_name=f"weekly_changes_{as_of.isoformat()}.png",
+                mime="image/png"
+            )
+
+    rows = [hdr("Weekly Changes")]
+
+    # STL Freight once at the top
+    rows.append(f'<tr class="section"><td colspan="{ncol}">STL Freight</td></tr>')
+    cells = "".join(_chg_cell(cur_frt["STL"].get(m), (w_frt.get("STL") or {}).get(m), "pct")
+                    for m in M.MONTHS)
+    rows.append(f'<tr class="frt-row"><td class="lbl">—</td>{cells}</tr>')
+
+    # CIF and FOB by commodity
+    for c in M.COMMODITIES:
+        rows.append(f'<tr class="section"><td colspan="{ncol}">{c}</td></tr>')
+        cur_fob = M.compute_fob_grid(c, cur_cif[c], cur_frt)["STL"]
+        w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
+                 if w_cif.get(c) else {})
+
+        # CIF
+        cells = "".join(_chg_cell(cur_cif[c].get(m), (w_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
+
+        # FOB
+        cells = "".join(_chg_cell(cur_fob.get(m), w_fob.get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">FOB</td>{cells}</tr>')
+
+    st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
+    st.caption(f"Week-over-week: working values vs ~7 days ago "
+               f"({pweek or 'none'}).")
+
+
+def load_prior(commodity, as_of_iso, cash_c):
+    """Comparison values from the most recent archived date before as_of_iso."""
+    pdate = next((d for d in db.list_dates() if d < as_of_iso), None)
+    if not pdate:
+        return None
+    cif, frt, cal = db.load_snapshot(pdate)
+    if cif is None:
+        return None
+    cols = (cal or {}).get(commodity)
+    pmonths = [m for m, _ in cols] if cols else M.MONTHS
+    cifc = cif.get(commodity, {}) or {}
+    grid = M.compute_fob_grid(commodity, cifc, frt, pmonths)
+    cfg = M.CARRY_CONFIG[commodity]
+    cashvals = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cash_c, pmonths)
+    return {"cif": cifc, "freight": frt, "grid": grid,
+            "cash": dict(zip(pmonths, cashvals))}
+
+
+# --- input workflow (Inputs tab) ------------------------------------------
+def _current_payloads():
+    cif = {c: {m: _safe(st.session_state[f"cif_{c}"].loc[m, "CIF"]) for m in M.MONTHS}
+           for c in M.COMMODITIES}
+    frt = {r: {m: _safe(st.session_state.freight.loc[r, m]) for m in M.MONTHS}
+           for r in M.FREIGHT_REGIONS}
+    cal = {c: list(zip(M.MONTHS, M.CONTRACTS[c])) for c in M.COMMODITIES}
+    return cif, frt, cal
+
+
+def save_current(as_of):
+    cif, frt, cal = _current_payloads()
+    return db.save_snapshot(as_of.isoformat(), cif, frt, cal)
+
+
+def _close(a, b):
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return abs(a - b) < 1e-9
+
+
+def saved_status(as_of):
+    """('none'|'insync'|'dirty') comparing current inputs to the saved snapshot."""
+    scif, sfrt, _ = db.load_snapshot(as_of.isoformat())
+    if scif is None:
+        return "none"
+    cif, frt, _ = _current_payloads()
+    for c in M.COMMODITIES:
+        for m in M.MONTHS:
+            if not _close(cif[c][m], (scif.get(c) or {}).get(m)):
+                return "dirty"
+    for r in M.FREIGHT_REGIONS:
+        for m in M.MONTHS:
+            if not _close(frt[r][m], (sfrt.get(r) or {}).get(m)):
+                return "dirty"
+    return "insync"
+
+
+def load_into_inputs(date_iso):
+    """Pull a saved date's CIF + freight into the editable input state."""
+    lc, lf, _ = db.load_snapshot(date_iso)
+    if lc is None:
+        return False
+    for c in M.COMMODITIES:
+        cur = st.session_state[f"cif_{c}"]
+        for m in M.MONTHS:
+            v = (lc.get(c) or {}).get(m)
+            if v is not None:
+                cur.loc[m, "CIF"] = v
+        st.session_state[f"cif_{c}"] = cur
+    fdf = st.session_state.freight
+    for r in M.FREIGHT_REGIONS:
+        for m in M.MONTHS:
+            v = (lf.get(r) or {}).get(m)
+            if v is not None:
+                fdf.loc[r, m] = v
+    st.session_state.freight = fdf
+    _bump_editors()
+    return True
+
+
+def apply_pasted_tables(cif_text, frt_text, fut_text):
+    """Fill the input editors from pasted CIF / freight / futures. -> (msgs, errs)."""
+    msgs, errs = [], []
+    if cif_text.strip():
+        res, err = paste_parse.parse_cif(cif_text)
+        if err:
+            errs.append("CIF: " + err)
+        else:
+            n = 0
+            for commodity, mv in res["cif"].items():
+                if commodity not in M.COMMODITIES:
+                    continue
+                cur = st.session_state[f"cif_{commodity}"]
+                for m, v in mv.items():
+                    if m in M.MONTHS:
+                        cur.loc[m, "CIF"] = v
+                        n += 1
+                st.session_state[f"cif_{commodity}"] = cur
+                cons = res["contracts"].get(commodity, {})
+                if cons:
+                    pre = {"Corn": "C", "Soybeans": "S", "Wheat": "W"}[commodity]
+                    st.session_state[f"contracts_{commodity}"] = [
+                        pre + cons[m] if m in cons else M.CONTRACTS[commodity][i]
+                        for i, m in enumerate(M.MONTHS)]
+            msgs.append(f"CIF — filled {n} values across {len(res['cif'])} commodities.")
+    if frt_text.strip():
+        res, err = paste_parse.parse_freight(frt_text)
+        if err:
+            errs.append("Freight: " + err)
+        else:
+            fdf = st.session_state.freight
+            n = 0
+            for region, mv in res["freight"].items():
+                if region not in M.FREIGHT_REGIONS:
+                    continue
+                for m, v in mv.items():
+                    if m in M.MONTHS:
+                        fdf.loc[region, m] = v
+                        n += 1
+            st.session_state.freight = fdf
+            msgs.append(f"Freight — filled {n} values across {len(res['freight'])} reaches.")
+            if res.get("date"):
+                st.session_state["pending_as_of"] = res["date"]
+                msgs.append(f"As-of date set to {res['date']:%m/%d/%Y}.")
+    if fut_text.strip():
+        res, err = paste_parse.parse_futures(fut_text)
+        if err:
+            errs.append("Futures: " + err)
+        else:
+            nf = ns = 0
+            for commodity, lp in res["futures"].items():
+                if commodity not in M.COMMODITIES:
+                    continue
+                active = (st.session_state.get(f"contracts_{commodity}")
+                          or list(M.CONTRACTS[commodity]))
+                cur = st.session_state[f"cif_{commodity}"]
+                for i, mth in enumerate(M.MONTHS):
+                    letter = active[i][-1]
+                    if letter in lp:
+                        cur.loc[mth, "Futures"] = lp[letter]
+                        nf += 1
+                st.session_state[f"cif_{commodity}"] = cur
+                # auto-compute spreads from consecutive distinct contracts
+                seen = []
+                for code in active:
+                    if code not in seen:
+                        seen.append(code)
+                prices = [lp.get(c[-1]) for c in seen[:4]]
+                if len(prices) >= 4 and all(p is not None for p in prices):
+                    cdf = st.session_state[f"carry_{commodity}"]
+                    for j, lbl in enumerate(M.CARRY_CONFIG[commodity]["spread_labels"]):
+                        cdf.loc["Spread", lbl] = round(prices[j] - prices[j + 1], 4)
+                        ns += 1
+                    st.session_state[f"carry_{commodity}"] = cdf
+            msgs.append(f"Futures — filled {nf} CBOT values; computed {ns} spreads.")
+    if msgs:
+        _bump_editors()
+    return msgs, errs
+
+
+def render_inputs_tab(as_of):
+    with st.expander("📋 Paste daily tables (CIF & Barge Freight)"):
+        pr = st.session_state.pop("paste_result", None)
+        if pr:
+            for m in pr[0]:
+                st.success("✓ " + m)
+            for e in pr[1]:
+                st.error(e)
+        st.caption("Copy each table from your daily source and paste below "
+                   "(headers included). MILO, TW and NW rows are ignored; the "
+                   "freight date auto-sets the as-of date; futures fill the CBOT "
+                   "row and compute spreads.")
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            cif_text = st.text_area("CIF NOLA table", height=220, key="paste_cif")
+        with pc2:
+            frt_text = st.text_area("Barge Freight table", height=220, key="paste_frt")
+        with pc3:
+            fut_text = st.text_area("Futures (Symbol / Last)", height=220,
+                                    key="paste_fut")
+        if st.button("⤵ Parse & fill inputs", type="primary"):
+            st.session_state["paste_result"] = apply_pasted_tables(
+                cif_text, frt_text, fut_text)
+            st.rerun()
+
+    ver = st.session_state.editor_ver
+    status = saved_status(as_of)
+    if status == "none":
+        st.warning(f"○ Nothing saved for **{as_of:%m/%d/%Y}** yet — this is a "
+                   "what-if. Hit **Save to archive** to commit it.")
+    elif status == "dirty":
+        st.warning(f"● **Unsaved what-if** — inputs differ from the saved "
+                   f"{as_of:%m/%d/%Y} snapshot. Save to overwrite, or Revert.")
+    else:
+        st.success(f"✓ In sync with the saved **{as_of:%m/%d/%Y}** snapshot.")
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        start = st.selectbox("Start from a saved date", ["—"] + db.list_dates(),
+                             key="start_from",
+                             help="Copy a prior day's values in as a starting "
+                                  "point, then tweak and save under the as-of date.")
+    with c2:
+        if st.button("📥 Load", use_container_width=True):
+            if start != "—" and load_into_inputs(start):
+                st.rerun()
+    with c3:
+        if st.button("↩ Revert", use_container_width=True,
+                     disabled=status == "none",
+                     help="Discard what-if edits, back to the saved snapshot."):
+            if load_into_inputs(as_of.isoformat()):
+                st.rerun()
+
+    st.markdown("#### Barge Freight · % of tariff (shared across commodities)")
+    fe = st.data_editor(
+        st.session_state.freight, use_container_width=True,
+        column_config={m: st.column_config.NumberColumn(m, format="%.2f", step=0.05)
+                       for m in M.MONTHS},
+        key=f"freight_editor_{ver}")
+    st.session_state.freight = fe
+
+    st.markdown("#### CIF & Futures by commodity")
+    for ct, commodity in zip(st.tabs(M.COMMODITIES), M.COMMODITIES):
+        with ct:
+            ce = st.data_editor(
+                st.session_state[f"cif_{commodity}"].T, use_container_width=True,
+                column_config={m: st.column_config.NumberColumn(m, format="%.4f")
+                               for m in M.MONTHS},
+                key=f"cif_editor_{commodity}_{ver}")
+            st.session_state[f"cif_{commodity}"] = ce.T
+            st.caption("Inter-contract spreads (manual until the futures feed). "
+                       "Full carry is computed from interest + storage.")
+            cc = st.data_editor(
+                st.session_state[f"carry_{commodity}"], use_container_width=True,
+                column_config={lbl: st.column_config.NumberColumn(lbl, format="%.4f")
+                               for lbl in M.CARRY_CONFIG[commodity]["spread_labels"]},
+                key=f"carry_editor_{commodity}_{ver}")
+            st.session_state[f"carry_{commodity}"] = cc
+            a, b = st.columns(2)
+            with a:
+                st.session_state[f"cashc_{commodity}"] = st.number_input(
+                    f"Cash distance from DVE ({M.CARRY_CONFIG[commodity]['cash_loc']})",
+                    value=float(st.session_state[f"cashc_{commodity}"]),
+                    step=0.01, format="%.2f", key=f"cashc_input_{commodity}_{ver}")
+            with b:
+                st.session_state[f"storage_{commodity}"] = st.number_input(
+                    f"{commodity} storage ($/bu/month)",
+                    value=float(st.session_state[f"storage_{commodity}"]),
+                    step=0.005, format="%.3f", key=f"storage_input_{commodity}_{ver}",
+                    help="Per-commodity; set wheat to its current VSR rate.")
+
+    st.divider()
+    s1, s2 = st.columns([1, 3])
+    with s1:
+        if st.button(f"💾 Save to archive", type="primary",
+                     use_container_width=True):
+            n_cif, n_frt = save_current(as_of)
+            st.success(f"Saved **{as_of:%m/%d/%Y}** — {n_cif} CIF + {n_frt} "
+                       "freight values.")
+            st.rerun()
+    with s2:
+        st.caption(f"Writes CIF + barge freight for **{as_of:%m/%d/%Y}** to the "
+                   "archive (upsert). Set the as-of date in the sidebar first.")
+
+
+# --- determine data source: live edit vs archived view --------------------
+hist_cif = hist_frt = None
+view_date = as_of
+hist_cal = None
+if HIST_DATE:
+    hist_cif, hist_frt, hist_cal = db.load_snapshot(HIST_DATE)
+    if hist_cif is None:
+        st.warning(f"No archived data found for {HIST_DATE}.")
+        HIST_DATE = None
+    else:
+        view_date = dt.date.fromisoformat(HIST_DATE)
+        st.info(f"📅 Viewing archived snapshot for **{view_date:%A, %B %d, %Y}** — "
+                "read-only · FOB recomputed from stored CIF + freight.")
+
+# --- tabs: Inputs + the three commodity sheets ----------------------------
+if HIST_DATE:
+    tabs = st.tabs(M.COMMODITIES + ["📈 Seasonal"])
+    with tabs[-1]:
+        render_seasonal_tab()
+    for tab, commodity in zip(tabs[:len(M.COMMODITIES)], M.COMMODITIES):
+        with tab:
+            cols = (hist_cal or {}).get(commodity)
+            months = [m for m, _ct in cols] if cols else M.MONTHS
+            contracts = [ct for _m, ct in cols] if cols else None
+            cif_row = hist_cif.get(commodity) or {}
+            fbr = {r: (hist_frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
+            cashc = st.session_state[f"cashc_{commodity}"]
+            prior = load_prior(commodity, HIST_DATE, cashc)
+            st.markdown(render_block(commodity, view_date, cif_row, {}, fbr,
+                                     [], [], cashc, historical=True,
+                                     contracts=contracts, months=months,
+                                     prior=prior),
+                        unsafe_allow_html=True)
+else:
+    tabs = st.tabs(["📝 Inputs"] + M.COMMODITIES + ["📈 Seasonal", "📊 Changes"])
+    with tabs[0]:
+        render_inputs_tab(as_of)
+    with tabs[-2]:
+        render_seasonal_tab()
+    with tabs[-1]:
+        render_changes_tab(as_of)
+    for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
+        with tab:
+            df = st.session_state[f"cif_{commodity}"]
+            cif_row = {m: df.loc[m, "CIF"] for m in M.MONTHS}
+            fut_row = {m: df.loc[m, "Futures"] for m in M.MONTHS}
+            fbr = {r: {m: st.session_state.freight.loc[r, m] for m in M.MONTHS}
+                   for r in M.FREIGHT_REGIONS}
+            cdf = st.session_state[f"carry_{commodity}"]
+            labels = M.CARRY_CONFIG[commodity]["spread_labels"]
+            spreads = [cdf.loc["Spread", l] for l in labels]
+            fullcarry = M.compute_full_carry(
+                commodity, fut_row,
+                st.session_state.interest_pct / 100.0,
+                st.session_state[f"storage_{commodity}"],
+            )
+            cashc = st.session_state[f"cashc_{commodity}"]
+            prior = load_prior(commodity, as_of.isoformat(), cashc)
+            st.markdown(render_block(commodity, as_of, cif_row, fut_row, fbr,
+                                     spreads, fullcarry, cashc, prior=prior,
+                                     contracts=st.session_state.get(f"contracts_{commodity}")),
+                        unsafe_allow_html=True)
+            st.markdown("##### 📈 Top of Carry")
+            render_carry_chart(commodity, M.compute_fob_grid(commodity, cif_row, fbr),
+                               spreads)
+
+st.caption("Mirrors JSA FOB Sheet · FOB = CIF − (tariff factor × freight%) ÷ 2000 × bushel weight")
