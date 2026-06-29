@@ -22,11 +22,20 @@ def _is_postgres():
     return _database_url().startswith(("postgres://", "postgresql://"))
 
 
+def _pg_dsn():
+    """Postgres URL with sslmode forced on (Supabase and most managed PG
+    require SSL; pooler URLs copied from the dashboard often omit it)."""
+    url = _database_url()
+    if "sslmode=" not in url:
+        url += ("&" if "?" in url else "?") + "sslmode=require"
+    return url
+
+
 def _connect():
     """Return (connection, paramstyle_placeholder)."""
     if _is_postgres():
         import psycopg2
-        return psycopg2.connect(_database_url()), "%s"
+        return psycopg2.connect(_pg_dsn()), "%s"
     conn = sqlite3.connect(LOCAL_SQLITE)
     return conn, "?"
 
