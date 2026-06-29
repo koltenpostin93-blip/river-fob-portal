@@ -644,41 +644,113 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
 CHART_LABEL = {"Corn": "Corn", "Soybeans": "Beans", "Wheat": "SRW"}
 
 
-def render_carry_chart(commodity, grid, spreads, months=None):
-    """Top-of-carry (cash forward curve on spot futures) for a chosen location."""
+def _archived_carry(commodity, date_iso, loc, spreads):
+    """Top-of-carry curve at `loc` for an archived date, aligned to M.MONTHS.
+
+    The archive stores only CIF + freight, so spreads aren't available per
+    date — the current spread structure is reused to anchor to spot. Archived
+    month labels are remapped to the canonical columns by month number.
+    """
+    cif_d, frt_d, _ = db.load_snapshot(date_iso)
+    if not cif_d:
+        return None
+    num_to_canon = {_month_num(m): m for m in M.MONTHS}
+    cmcif = cif_d.get(commodity, {}) or {}
+    cif_canon = {num_to_canon[n]: v for m, v in cmcif.items()
+                 if (n := _month_num(m)) in num_to_canon}
+    frt_canon = {}
+    for region, mv in (frt_d or {}).items():
+        frt_canon[region] = {num_to_canon[n]: v for m, v in mv.items()
+                             if (n := _month_num(m)) in num_to_canon}
+    grid_d = M.compute_fob_grid(commodity, cif_canon, frt_canon)
+    return M.top_carry(commodity, grid_d[loc], spreads)
+
+
+def render_carry_chart(commodity, grid, spreads, as_of=None, months=None):
+    """Top-of-carry (cash forward curve on spot futures) for a chosen location,
+    optionally overlaying the same curve from one or more archived dates."""
     months = months or M.MONTHS
     locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
     default = locs.index("STL") if "STL" in locs else 0
-    loc = st.selectbox(
-        "Location", locs, index=default, key=f"carry_chart_loc_{commodity}",
-        help="Top-of-carry curve for this location, anchored at its spot basis "
-             "(the first month) and carried out on spot futures.")
+    cc1, cc2 = st.columns([1, 2])
+    with cc1:
+        loc = st.selectbox(
+            "Location", locs, index=default, key=f"carry_chart_loc_{commodity}",
+            help="Top-of-carry curve for this location, anchored at its spot "
+                 "basis (the first month) and carried out on spot futures.")
+    with cc2:
+        cmp_dates = st.multiselect(
+            "Overlay saved dates", db.list_dates(), key=f"carry_cmp_{commodity}",
+            help="Add the forward curve from one or more archived dates to "
+                 "compare how it has shifted. Archived curves use the current "
+                 "spread structure (spreads aren't stored per date).")
+
+    def _mdy(dd):
+        return f"{dd.month}/{dd.day}/{dd.year % 100:02d}"
+
+    cur_label = f"Working ({_mdy(as_of)})" if as_of else "Working"
+    rows = []
     tc = M.top_carry(commodity, grid[loc], spreads)
-    data = [{"Month": m, "Carry": float(v)} for m, v in zip(months, tc)
-            if v is not None and not pd.isna(v)]
-    if not data:
+    for m, v in zip(months, tc):
+        if v is not None and not pd.isna(v):
+            rows.append({"Month": m, "Carry": float(v), "Series": cur_label})
+    for d in cmp_dates:
+        tcd = _archived_carry(commodity, d, loc, spreads)
+        if not tcd:
+            continue
+        dl = _mdy(dt.date.fromisoformat(d))
+        for m, v in zip(M.MONTHS, tcd):
+            if v is not None and not pd.isna(v):
+                rows.append({"Month": m, "Carry": float(v), "Series": dl})
+
+    if not rows:
         st.info("No carry data for this selection.")
         return
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(rows)
+    multi = len(cmp_dates) > 0
     title = f"Cash Fwd Curve {CHART_LABEL[commodity]} (Basis Spot Futures): {loc}"
-    base = alt.Chart(df).encode(
-        x=alt.X("Month:N", sort=months, title=None,
-                axis=alt.Axis(labelColor="#1f4e79", labelFontWeight="bold",
-                              labelFontSize=12, labelAngle=0)),
-        y=alt.Y("Carry:Q", title=None, axis=alt.Axis(format=".2f")))
-    line = base.mark_line(color="#1f4e79", strokeWidth=3,
-                          point=alt.OverlayMarkDef(color="#1f4e79", size=45))
-    labels = base.mark_text(dy=-13, color="#c00000", fontWeight="bold",
-                            fontSize=12).encode(text=alt.Text("Carry:Q", format=".2f"))
-    chart = alt.layer(line, labels).properties(
-        height=340, background="transparent",
+
+    x = alt.X("Month:N", sort=months, title=None,
+              axis=alt.Axis(labelColor="#1f4e79", labelFontWeight="bold",
+                            labelFontSize=12, labelAngle=0))
+    y = alt.Y("Carry:Q", title=None, axis=alt.Axis(format=".2f"))
+
+    if not multi:
+        # Single curve: keep the original clean styling with value labels.
+        base = alt.Chart(df).encode(x=x, y=y)
+        line = base.mark_line(color="#1f4e79", strokeWidth=3,
+                              point=alt.OverlayMarkDef(color="#1f4e79", size=45))
+        labels = base.mark_text(dy=-13, color="#c00000", fontWeight="bold",
+                                fontSize=12).encode(
+            text=alt.Text("Carry:Q", format=".2f"))
+        chart = alt.layer(line, labels)
+    else:
+        # Multiple curves: color by series, emphasize the working line, legend on.
+        order = [cur_label] + [s for s in df["Series"].unique() if s != cur_label]
+        color = alt.Color("Series:N", sort=order, title="Curve",
+                          scale=alt.Scale(scheme="tableau10"))
+        size = alt.condition(f"datum.Series === '{cur_label}'",
+                             alt.value(3.5), alt.value(2))
+        base = alt.Chart(df).encode(
+            x=x, y=y, color=color, size=size,
+            tooltip=[alt.Tooltip("Series:N"), alt.Tooltip("Month:N"),
+                     alt.Tooltip("Carry:Q", format=".2f")])
+        chart = base.mark_line(point=alt.OverlayMarkDef(size=35))
+
+    chart = chart.properties(
+        height=360, background="transparent",
         title=alt.TitleParams(title, color="#c00000", fontSize=17,
                               fontWeight="bold", anchor="middle"),
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
-        grid=True, gridColor="#e6e6e6", domainColor="#cccccc")
+        grid=True, gridColor="#e6e6e6", domainColor="#cccccc"
+    ).configure_legend(titleColor="#1f4e79", labelColor="#333",
+                       labelFontWeight="bold")
     # Watermark sits behind the chart via CSS (see .vega-embed::before); the
     # chart itself stays clean.
     st.altair_chart(chart, use_container_width=True)
+    if multi:
+        st.caption("Archived curves reuse the current spread structure to anchor "
+                   "to spot (spreads aren't stored per date).")
 
 
 # Marketing-year start month per commodity (corn/soy Sep, wheat Jun).
@@ -1447,6 +1519,6 @@ else:
                         unsafe_allow_html=True)
             st.markdown("##### 📈 Top of Carry")
             render_carry_chart(commodity, M.compute_fob_grid(commodity, cif_row, fbr),
-                               spreads)
+                               spreads, as_of=as_of)
 
 st.caption("Mirrors JSA FOB Sheet · FOB = CIF − (tariff factor × freight%) ÷ 2000 × bushel weight")
