@@ -20,14 +20,19 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from dotenv import load_dotenv
-
 import fob_model as M
 import seed_data as S
 import db
 import paste_parse
 
-load_dotenv()
+# Local convenience: load a .env if python-dotenv is installed. It's optional —
+# on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
+# so a missing package must never crash the app.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ModuleNotFoundError:
+    pass
 
 # On Streamlit Community Cloud, secrets live in st.secrets rather than .env.
 # Inject any secrets not already set by load_dotenv() into os.environ so db.py
