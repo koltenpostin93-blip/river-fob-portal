@@ -1,11 +1,16 @@
 """
 Default seed values taken from the 6.23 tab of the JSA FOB Sheet (June 2026).
-Used to pre-populate the portal so it mirrors the live workbook. Order of each
-list matches fob_model.MONTHS = [June, July, Aug, Sep, Oct, Nov, Dec, Jan].
+Used to pre-populate the portal so it mirrors the live workbook. Each per-month
+list is aligned to SEED_MONTHS (the June window); the app looks these up by
+month name, so as the window rolls, overlapping months keep their seed and new
+months (e.g. Feb) start blank.
 
 Freight % is shared across all commodities (entered in the corn section of the
 sheet). None = month not quoted (shows blank).
 """
+
+# The delivery window these per-month seed lists correspond to.
+SEED_MONTHS = ["June", "July", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan"]
 
 SEED_FREIGHT = {
     "Lower Miss":      [3.75, 3.75, 5.25, 7.40, 7.25, 5.00, 4.60, 4.25],

@@ -11,8 +11,14 @@ import re
 import datetime as dt
 
 # Source month-row label -> sheet month key. TW/NW (spot week) are skipped.
-_MONTHS = {"JUNE": "June", "JULY": "July", "AUG": "Aug", "SEPT": "Sep",
-           "SEP": "Sep", "OCT": "Oct", "NOV": "Nov", "DEC": "Dec", "JAN": "Jan"}
+# Full set so the rolling window works year-round (June/July spelled out to
+# match the sheet's column labels; the rest 3-letter).
+_MONTHS = {"JAN": "Jan", "JANUARY": "Jan", "FEB": "Feb", "FEBRUARY": "Feb",
+           "MAR": "Mar", "MARCH": "Mar", "APR": "Apr", "APRIL": "Apr",
+           "MAY": "May", "JUNE": "June", "JUN": "June", "JULY": "July",
+           "JUL": "July", "AUG": "Aug", "AUGUST": "Aug", "SEP": "Sep",
+           "SEPT": "Sep", "SEPTEMBER": "Sep", "OCT": "Oct", "OCTOBER": "Oct",
+           "NOV": "Nov", "NOVEMBER": "Nov", "DEC": "Dec", "DECEMBER": "Dec"}
 
 _COMMODITIES = {"CORN": "Corn", "BEANS": "Soybeans", "SOYBEANS": "Soybeans",
                 "WHEAT": "Wheat"}  # MILO intentionally absent

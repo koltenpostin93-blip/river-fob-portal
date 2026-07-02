@@ -20,10 +20,24 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dotenv import load_dotenv
+
 import fob_model as M
 import seed_data as S
 import db
 import paste_parse
+
+load_dotenv()
+
+# On Streamlit Community Cloud, secrets live in st.secrets rather than .env.
+# Inject any secrets not already set by load_dotenv() into os.environ so db.py
+# reads the shared Supabase via os.getenv() — same pattern as the basis tracker.
+try:
+    for _secret_key in ("DATABASE_URL",):
+        if _secret_key in st.secrets and not os.environ.get(_secret_key):
+            os.environ[_secret_key] = st.secrets[_secret_key]
+except Exception:
+    pass  # st.secrets not available (no secrets configured) — fine locally
 
 st.set_page_config(
     page_title="River FOB Values · JPSI",
@@ -392,18 +406,29 @@ st.markdown(
 
 
 # --- session state seed ----------------------------------------------------
+def _by_month(seed_list):
+    """A June-window-aligned seed list -> {month_name: value} for name lookup."""
+    return dict(zip(S.SEED_MONTHS, seed_list))
+
+
 def _init_state():
+    """Create the editable input tables if absent, indexed by the current
+    rolling window (M.MONTHS). Seeds are matched by month name so a rolled
+    window keeps overlapping months and blanks the newly-added ones."""
+    months = M.MONTHS
     if "freight" not in st.session_state:
         st.session_state.freight = pd.DataFrame(
-            {m: [S.SEED_FREIGHT[r][i] for r in M.FREIGHT_REGIONS]
-                 for i, m in enumerate(M.MONTHS)},
+            {m: [_by_month(S.SEED_FREIGHT[r]).get(m) for r in M.FREIGHT_REGIONS]
+                 for m in months},
             index=M.FREIGHT_REGIONS,
         )
     for c in M.COMMODITIES:
         if f"cif_{c}" not in st.session_state:
+            cifm, futm = _by_month(S.SEED_CIF[c]), _by_month(S.SEED_FUTURES[c])
             st.session_state[f"cif_{c}"] = pd.DataFrame(
-                {"CIF": S.SEED_CIF[c], "Futures": S.SEED_FUTURES[c]},
-                index=M.MONTHS,
+                {"CIF": [cifm.get(m) for m in months],
+                 "Futures": [futm.get(m) for m in months]},
+                index=months,
             )
         if f"carry_{c}" not in st.session_state:
             st.session_state[f"carry_{c}"] = pd.DataFrame(
@@ -421,7 +446,23 @@ def _init_state():
         st.session_state.editor_ver = 0
 
 
-_init_state()
+def _reindex_to_window():
+    """Roll the persisted input tables onto the current month window: overlapping
+    months keep their values, newly-added months (e.g. Feb) come in blank, and
+    months that fell off the front are dropped. Runs when the as-of month changes."""
+    months = M.MONTHS
+    changed = False
+    f = st.session_state.freight
+    if list(f.columns) != months:
+        st.session_state.freight = f.reindex(columns=months)
+        changed = True
+    for c in M.COMMODITIES:
+        df = st.session_state[f"cif_{c}"]
+        if list(df.index) != months:
+            st.session_state[f"cif_{c}"] = df.reindex(months)
+            changed = True
+    if changed:
+        _bump_editors()
 
 
 def _bump_editors():
@@ -449,10 +490,16 @@ with st.sidebar:
         help="The date the inputs represent and will save under. Can be a "
              "future date when prepping the next sheet. Auto-set when you "
              "paste a dated freight table.")
+    # Roll the working delivery window + contracts to the chosen as-of month
+    # (e.g. July drops June and adds February), then create/reindex the inputs.
+    M.MONTHS = M.months_for(as_of)
+    M.CONTRACTS = {c: M.contracts_for(c, as_of) for c in M.COMMODITIES}
+    _init_state()
+    _reindex_to_window()
     st.caption(
-        "Enter CIF & barge freight on the **📝 Inputs** tab — the commodity tabs "
-        "update live. That's a *what-if* until you hit **Save**, which archives "
-        "the snapshot for this date.")
+        f"Delivery window: **{M.MONTHS[0]} – {M.MONTHS[-1]}** (rolls with the "
+        "as-of month). Enter CIF & barge freight on the **📝 Inputs** tab — the "
+        "commodity tabs update live; *what-if* until you **Save**.")
     st.markdown("**Full-carry assumptions**")
     st.session_state.interest_pct = st.number_input(
         "Annual interest rate (%)", value=float(st.session_state.interest_pct),
@@ -755,8 +802,8 @@ def render_carry_chart(commodity, grid, spreads, as_of=None, months=None):
 
 # Marketing-year start month per commodity (corn/soy Sep, wheat Jun).
 SEASON_START = {"Corn": 9, "Soybeans": 9, "Wheat": 6}
-MONTH_NUM = {"June": 6, "July": 7, "Aug": 8, "Sep": 9,
-             "Oct": 10, "Nov": 11, "Dec": 12, "Jan": 1}
+# Full label->number map (window labels can now be any month as it rolls).
+MONTH_NUM = {M._MONTH_LABEL[n]: n for n in range(1, 13)}
 
 # Map any stored month label (abbrev or full, across import eras) -> month #.
 _MNUM = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,

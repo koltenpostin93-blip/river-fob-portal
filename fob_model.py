@@ -15,18 +15,63 @@ from dataclasses import dataclass
 # Static structure
 # ---------------------------------------------------------------------------
 
-MONTHS = ["June", "July", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan"]
+import datetime as _dt
 
 COMMODITIES = ["Corn", "Soybeans", "Wheat"]
 
 BUSHEL_WEIGHT = {"Corn": 56, "Soybeans": 60, "Wheat": 60}
 
-# Futures contract symbol mapped to each month column, per commodity.
-CONTRACTS = {
-    "Corn":     ["CN", "CN", "CU", "CU", "CZ", "CZ", "CZ", "CH"],
-    "Soybeans": ["SN", "SN", "SQ", "SX", "SX", "SX", "SF", "SF"],
-    "Wheat":    ["WN", "WN", "WU", "WU", "WZ", "WZ", "WZ", "WH"],
+# ---------------------------------------------------------------------------
+# Rolling delivery window + futures-contract mapping
+# ---------------------------------------------------------------------------
+# The sheet shows an 8-month forward window that rolls each calendar month:
+# in June it is June..Jan; in July it drops June and adds February, etc.
+# Labels match the workbook (June/July spelled out, the rest 3-letter).
+
+_MONTH_LABEL = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "June",
+                7: "July", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+_LABEL_MONTH = {v.lower(): k for k, v in _MONTH_LABEL.items()}
+
+# Per-commodity futures cycle: contract-month number -> code letter. A cash
+# delivery month is priced against the first contract on/after it (wrapping).
+CONTRACT_CYCLE = {
+    "Corn":     {3: "H", 5: "K", 7: "N", 9: "U", 12: "Z"},
+    "Soybeans": {1: "F", 3: "H", 5: "K", 7: "N", 8: "Q", 11: "X"},
+    "Wheat":    {3: "H", 5: "K", 7: "N", 9: "U", 12: "Z"},
 }
+_CONTRACT_PREFIX = {"Corn": "C", "Soybeans": "S", "Wheat": "W"}
+
+
+def months_for(as_of):
+    """The 8-month rolling delivery window starting at the as-of month."""
+    return [_MONTH_LABEL[((as_of.month - 1 + i) % 12) + 1] for i in range(8)]
+
+
+def label_month_num(label):
+    """Month number for a window label ('June'->6), or None."""
+    return _LABEL_MONTH.get(str(label).strip().lower())
+
+
+def contract_for(commodity, month_num):
+    """Futures contract a cash delivery month is priced against (e.g. 'CN'):
+    the first contract in the crop's cycle on/after that month, wrapping."""
+    cyc = CONTRACT_CYCLE[commodity]
+    on_after = [mo for mo in cyc if mo >= month_num]
+    ref = min(on_after) if on_after else min(cyc)
+    return _CONTRACT_PREFIX[commodity] + cyc[ref]
+
+
+def contracts_for(commodity, as_of):
+    """Contract code for each column of the rolling window."""
+    return [contract_for(commodity, ((as_of.month - 1 + i) % 12) + 1)
+            for i in range(8)]
+
+
+# Static defaults (the June window) — kept so the import/backfill scripts, which
+# read June-era workbooks positionally, and any bare import keep working. The
+# Streamlit app overrides MONTHS / CONTRACTS per-run from the chosen as-of date.
+MONTHS = months_for(_dt.date(2026, 6, 1))
+CONTRACTS = {c: contracts_for(c, _dt.date(2026, 6, 1)) for c in COMMODITIES}
 
 # Freight reaches the user enters (the % of tariff, by month).
 # MTCT mirrors Lower Miss in the sheet, so Memphis/Cairo draw from Lower Miss.
@@ -177,11 +222,15 @@ def contract_indices(commodity):
 
 
 def spread_offsets(commodity, spreads):
-    """Cumulative spread offset per month (sum of spreads before its contract)."""
+    """Cumulative spread offset per month (sum of spreads before its contract).
+
+    The window can hold more distinct contracts than there are spreads (e.g. a
+    5th contract rolls in) — those columns reuse the last cumulative offset
+    rather than indexing past the spread list."""
     cum = [0.0]
     for s in spreads:
         cum.append(cum[-1] + (s or 0.0))
-    return [cum[i] for i in contract_indices(commodity)]
+    return [cum[min(i, len(cum) - 1)] for i in contract_indices(commodity)]
 
 
 def pct_full_carry(spreads, fullcarry):
