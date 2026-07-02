@@ -4,7 +4,9 @@ Import historical FOB sheets into the archive (CIF + barge freight + calendar).
 Adaptive parser — handles the layout drift across years:
   * label column auto-detected (A or B)
   * data columns derived from the CBOT row's numeric cells (works for the
-    2023-era Spot/Mar/Apr... set and the 2026-era June...Jan set alike)
+    2023-era Spot/Mar/Apr... set and the 2026-era June...Jan set alike), with a
+    fallback to the month-header row when the CBOT row is #NAME? (Barchart
+    add-in not connected — otherwise the column detection finds nothing)
   * CIF / freight / FOB rows + month & contract headers located by label text
   * freight-row name variants normalised ("IL Barge Freight" -> "IL")
 
@@ -149,20 +151,39 @@ def parse_tab(ws):
                        if str(ws.cell(r, lc).value or "").strip().upper() == "CBOT"), None)
         if not cbot_r:
             continue
-        # CBOT row has numbers in the curve columns AND in stray panels to the
-        # right; keep only columns whose header is a real month, normalised, and
-        # drop duplicates (leftmost = the true forward-curve column).
-        raw = [c for c in range(lc + 1, ws.max_column + 1)
-               if isinstance(ws.cell(cbot_r, c).value, (int, float))]
-        data_cols, months, contracts, seen = [], [], [], set()
-        for c in raw:
-            lbl = _canon_month(ws.cell(cbot_r - 2, c).value)
-            if lbl is None or lbl in seen:
-                continue
-            seen.add(lbl)
-            data_cols.append(c)
-            months.append(lbl)
-            contracts.append(str(ws.cell(cbot_r - 1, c).value or "").strip())
+        # The month header sits 2 rows above CBOT, the contract row 1 above.
+        header_r, contract_r = cbot_r - 2, cbot_r - 1
+
+        def _collect(candidate_cols, contiguous=False):
+            """Keep columns whose header normalises to a real month; drop
+            duplicates (leftmost = the true forward-curve column). With
+            contiguous=True, stop at the first gap once the curve has begun so a
+            far-right month-labelled panel can't be swept in."""
+            dcols, mons, cons, seen = [], [], [], set()
+            started = False
+            for c in candidate_cols:
+                lbl = _canon_month(ws.cell(header_r, c).value)
+                if lbl is None or lbl in seen:
+                    if contiguous and started:
+                        break
+                    continue
+                started = True
+                seen.add(lbl)
+                dcols.append(c)
+                mons.append(lbl)
+                cons.append(str(ws.cell(contract_r, c).value or "").strip())
+            return dcols, mons, cons
+
+        # Primary: columns where the CBOT row is numeric (Barchart connected) —
+        # this also screens out stray numeric panels to the right.
+        cbot_cols = [c for c in range(lc + 1, ws.max_column + 1)
+                     if isinstance(ws.cell(cbot_r, c).value, (int, float))]
+        data_cols, months, contracts = _collect(cbot_cols)
+        # Fallback: CBOT is #NAME?/blank (add-in not connected) — detect the
+        # curve straight from the month-header row (contiguous run only).
+        if not data_cols:
+            data_cols, months, contracts = _collect(
+                range(lc + 1, ws.max_column + 1), contiguous=True)
         if not data_cols:
             continue
         calendar[commodity] = list(zip(months, contracts))
