@@ -179,11 +179,14 @@ def parse_tab(ws):
         cbot_cols = [c for c in range(lc + 1, ws.max_column + 1)
                      if isinstance(ws.cell(cbot_r, c).value, (int, float))]
         data_cols, months, contracts = _collect(cbot_cols)
-        # Fallback: CBOT is #NAME?/blank (add-in not connected) — detect the
-        # curve straight from the month-header row (contiguous run only).
-        if not data_cols:
-            data_cols, months, contracts = _collect(
-                range(lc + 1, ws.max_column + 1), contiguous=True)
+        # Header-row detection (contiguous run) — the reliable source when the
+        # CBOT row is #NAME?/#NUM!/blank (add-in not connected) or only partly
+        # resolved. Use it whenever it reveals a longer curve than CBOT did; on a
+        # fully-connected sheet the two agree, so good workbooks are unchanged.
+        h_cols, h_months, h_contracts = _collect(
+            range(lc + 1, ws.max_column + 1), contiguous=True)
+        if len(h_cols) > len(data_cols):
+            data_cols, months, contracts = h_cols, h_months, h_contracts
         if not data_cols:
             continue
         calendar[commodity] = list(zip(months, contracts))
