@@ -467,6 +467,12 @@ def _reindex_to_window():
             st.session_state[f"cif_{c}"] = df.reindex(months)
             changed = True
     if changed:
+        # Drop any contract overrides captured from an earlier paste — they were
+        # positioned for the old window and would desync the displayed contract
+        # row / spread auto-compute from the rolled window. They fall back to
+        # M.CONTRACTS (correct for the new window) until the next paste.
+        for c in M.COMMODITIES:
+            st.session_state.pop(f"contracts_{c}", None)
         _bump_editors()
 
 
