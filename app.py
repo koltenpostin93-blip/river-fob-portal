@@ -436,7 +436,10 @@ def _init_state():
                 index=months,
             )
         if f"carry_{c}" not in st.session_state:
-            seedmap = dict(zip(S.SEED_SPREAD_LABELS[c], S.SEED_SPREADS[c]))
+            # getattr guard: survive a stale/partial module reload where
+            # SEED_SPREAD_LABELS isn't present yet (new spreads just seed to 0).
+            seed_labels = getattr(S, "SEED_SPREAD_LABELS", {}).get(c, [])
+            seedmap = dict(zip(seed_labels, S.SEED_SPREADS[c]))
             st.session_state[f"carry_{c}"] = pd.DataFrame(
                 {lbl: [seedmap.get(lbl, 0.0)] for lbl in M.spread_labels_for(c)},
                 index=["Spread"],
