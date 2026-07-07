@@ -247,12 +247,22 @@ CONTRACT_MONTH = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
 
 
 def distinct_contracts(commodity):
-    """The 4 distinct futures contracts of a commodity, in calendar order."""
+    """The distinct futures contracts in the window, in column order. Follows the
+    active CONTRACTS, so if the front has rolled (e.g. SN -> SQ) the spot contract
+    and the whole chain roll with it."""
     seen = []
     for c in CONTRACTS[commodity]:
         if c not in seen:
             seen.append(c)
     return seen
+
+
+def spread_labels_for(commodity):
+    """Inter-contract spread labels for the current distinct contracts, e.g.
+    ['SQ/SX', 'SX/SF', 'SF/SH'] once the front has rolled to SQ. One fewer than
+    the number of distinct contracts."""
+    dc = distinct_contracts(commodity)
+    return [f"{dc[i]}/{dc[i + 1]}" for i in range(len(dc) - 1)]
 
 
 def spread_months(commodity):

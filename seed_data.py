@@ -34,11 +34,19 @@ SEED_FUTURES = {  # CBOT flat price $/bu
     "Wheat":    [5.8675, 5.8675, 5.8675, 5.97, 5.97, 6.1375, 6.1375, 6.1375],
 }
 
-# Three inter-contract spreads (front − next) per commodity.
+# Three inter-contract spreads (front − next) per commodity, and the contract
+# pair each corresponds to (June window). Seeds are matched to the live spread
+# labels by name, so as the front rolls (e.g. SN→SQ) the labels that still exist
+# keep their seed and new ones start at 0.
 SEED_SPREADS = {
     "Corn":     [-0.0800, -0.1950, -0.1450],
     "Soybeans": [-0.0700, -0.0325, -0.1425],
     "Wheat":    [-0.1025, -0.1675, -0.1475],
+}
+SEED_SPREAD_LABELS = {
+    "Corn":     ["CN/CU", "CU/CZ", "CZ/CH"],
+    "Soybeans": ["SN/SQ", "SQ/SX", "SX/SF"],
+    "Wheat":    ["WN/WU", "WU/WZ", "WZ/WH"],
 }
 
 # Full-carry reference per spread (the theoretical max carry; from quote feed).

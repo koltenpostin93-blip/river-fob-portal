@@ -436,9 +436,9 @@ def _init_state():
                 index=months,
             )
         if f"carry_{c}" not in st.session_state:
+            seedmap = dict(zip(S.SEED_SPREAD_LABELS[c], S.SEED_SPREADS[c]))
             st.session_state[f"carry_{c}"] = pd.DataFrame(
-                {lbl: [S.SEED_SPREADS[c][i]]
-                 for i, lbl in enumerate(M.CARRY_CONFIG[c]["spread_labels"])},
+                {lbl: [seedmap.get(lbl, 0.0)] for lbl in M.spread_labels_for(c)},
                 index=["Spread"],
             )
         if f"cashc_{c}" not in st.session_state:
@@ -476,6 +476,35 @@ def _reindex_to_window():
         _bump_editors()
 
 
+def _apply_paste_contracts():
+    """Let the contracts captured from the pasted CIF sheet drive the model, so a
+    manually-rolled front (e.g. soybeans SN→SQ) flows through to the spot anchor,
+    spreads, and top-of-carry. Falls back to the computed cycle when nothing was
+    pasted for this window."""
+    for c in M.COMMODITIES:
+        sc = st.session_state.get(f"contracts_{c}")
+        if sc and len(sc) == len(M.MONTHS):
+            M.CONTRACTS[c] = list(sc)
+
+
+def _reindex_carry():
+    """Keep each commodity's spread editor aligned to its current contract chain.
+    When the front rolls, labels change (SN/SQ → SQ/SX …); persisting labels keep
+    their value, brand-new ones seed to 0."""
+    for c in M.COMMODITIES:
+        labels = M.spread_labels_for(c)
+        cdf = st.session_state.get(f"carry_{c}")
+        if cdf is None or list(cdf.columns) == labels:
+            continue
+        seedmap = dict(zip(S.SEED_SPREAD_LABELS[c], S.SEED_SPREADS[c]))
+        old = {col: cdf.loc["Spread", col] for col in cdf.columns}
+        vals = {lbl: (old[lbl] if lbl in old else seedmap.get(lbl, 0.0))
+                for lbl in labels}
+        st.session_state[f"carry_{c}"] = pd.DataFrame(
+            {lbl: [v] for lbl, v in vals.items()}, index=["Spread"])
+        _bump_editors()
+
+
 def _bump_editors():
     """Force input editors to re-read session state after a programmatic load."""
     st.session_state.editor_ver += 1
@@ -507,6 +536,10 @@ with st.sidebar:
     M.CONTRACTS = {c: M.contracts_for(c, as_of) for c in M.COMMODITIES}
     _init_state()
     _reindex_to_window()
+    # Honor a manually-rolled front captured from the pasted sheet, then align the
+    # spread editors to the resulting contract chain.
+    _apply_paste_contracts()
+    _reindex_carry()
     st.caption(
         f"Delivery window: **{M.MONTHS[0]} – {M.MONTHS[-1]}** (rolls with the "
         "as-of month). Enter CIF & barge freight on the **📝 Inputs** tab — the "
@@ -645,24 +678,28 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     rows.append(f'<tr class="strong"><td class="lbl">{cfg["cash_label"]}</td>'
                 f'{cash_cells}</tr>')
 
-    # Spreads / Carry section (after Cash vs Delivery, before river reaches)
+    # Spreads / Carry section (after Cash vs Delivery, before river reaches).
+    # Labels + count follow the current contract chain (spreads roll with the
+    # front), laid out label/value across the trailing columns.
     if not historical:
-        # Spreads row: labels in Aug/Oct/Dec columns, values in Sep/Nov/Jan
-        labels = cfg["spread_labels"]
-        scells = ["<td></td>", "<td></td>"]  # June, July
-        for i in range(3):
+        labels = M.spread_labels_for(commodity)
+        n = len(labels)
+        pad = max(0, len(months) - 2 * n)
+        scells = ["<td></td>"] * pad
+        for i in range(n):
             scells.append(f'<td class="slabel">{labels[i]}</td>')
-            scells.append(_spread_cell(spreads[i]))
+            scells.append(_spread_cell(spreads[i]) if i < len(spreads)
+                          else "<td></td>")
         rows.append('<tr class="spread"><td class="lbl">Spreads</td>'
                     + "".join(scells) + "</tr>")
 
-        # % Full Carry: values under Sep / Nov / Jan
+        # % Full Carry sits under each spread's value column.
         carry = M.pct_full_carry(spreads, fullcarry)
-        ccells = ["<td></td>"] * 3  # June, July, Aug
-        for i in range(3):
-            ccells.append(_carry_pct_cell(carry[i]))   # Sep, Nov, Jan
-            if i < 2:
-                ccells.append("<td></td>")             # Oct, Dec
+        ccells = ["<td></td>"] * len(months)
+        for i in range(min(n, len(carry))):
+            pos = pad + 2 * i + 1
+            if pos < len(ccells):
+                ccells[pos] = _carry_pct_cell(carry[i])
         rows.append('<tr class="spread"><td class="lbl">% Full Carry</td>'
                     + "".join(ccells) + "</tr>")
 
@@ -1390,18 +1427,21 @@ def apply_pasted_tables(cif_text, frt_text, fut_text):
                         cur.loc[mth, "Futures"] = lp[letter]
                         nf += 1
                 st.session_state[f"cif_{commodity}"] = cur
-                # auto-compute spreads from consecutive distinct contracts
+                # auto-compute spreads for each consecutive distinct-contract pair
+                # in the (possibly rolled) chain — labels roll with the front.
                 seen = []
                 for code in active:
                     if code not in seen:
                         seen.append(code)
-                prices = [lp.get(c[-1]) for c in seen[:4]]
-                if len(prices) >= 4 and all(p is not None for p in prices):
-                    cdf = st.session_state[f"carry_{commodity}"]
-                    for j, lbl in enumerate(M.CARRY_CONFIG[commodity]["spread_labels"]):
-                        cdf.loc["Spread", lbl] = round(prices[j] - prices[j + 1], 4)
-                        ns += 1
-                    st.session_state[f"carry_{commodity}"] = cdf
+                vals = {}
+                for j in range(len(seen) - 1):
+                    p0, p1 = lp.get(seen[j][-1]), lp.get(seen[j + 1][-1])
+                    if p0 is not None and p1 is not None:
+                        vals[f"{seen[j]}/{seen[j + 1]}"] = round(p0 - p1, 4)
+                if vals:
+                    st.session_state[f"carry_{commodity}"] = pd.DataFrame(
+                        {lbl: [v] for lbl, v in vals.items()}, index=["Spread"])
+                    ns += len(vals)
             msgs.append(f"Futures — filled {nf} CBOT values; computed {ns} spreads.")
     if msgs:
         _bump_editors()
@@ -1483,7 +1523,7 @@ def render_inputs_tab(as_of):
             cc = st.data_editor(
                 st.session_state[f"carry_{commodity}"], use_container_width=True,
                 column_config={lbl: st.column_config.NumberColumn(lbl, format="%.4f")
-                               for lbl in M.CARRY_CONFIG[commodity]["spread_labels"]},
+                               for lbl in M.spread_labels_for(commodity)},
                 key=f"carry_editor_{commodity}_{ver}")
             st.session_state[f"carry_{commodity}"] = cc
             a, b = st.columns(2)
@@ -1562,8 +1602,9 @@ else:
             fbr = {r: {m: st.session_state.freight.loc[r, m] for m in M.MONTHS}
                    for r in M.FREIGHT_REGIONS}
             cdf = st.session_state[f"carry_{commodity}"]
-            labels = M.CARRY_CONFIG[commodity]["spread_labels"]
-            spreads = [cdf.loc["Spread", l] for l in labels]
+            labels = M.spread_labels_for(commodity)
+            spreads = [cdf.loc["Spread", l] if l in cdf.columns else None
+                       for l in labels]
             fullcarry = M.compute_full_carry(
                 commodity, fut_row,
                 st.session_state.interest_pct / 100.0,
