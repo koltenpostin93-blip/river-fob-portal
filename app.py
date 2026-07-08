@@ -25,6 +25,7 @@ import seed_data as S
 import db
 import paste_parse
 import fob_pdf
+import fob_excel
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -687,6 +688,82 @@ def build_fob_pdf(as_of):
     """3-page PDF (Corn, Soybeans, Wheat) of the current working sheets."""
     sheets = [_build_pdf_sheet(c) for c in M.COMMODITIES]
     return fob_pdf.build_pdf(as_of, sheets)
+
+
+def _xnum(v):
+    """Raw float (or None) for Excel cells."""
+    return None if v is None or pd.isna(v) else float(v)
+
+
+def _build_excel_sheet(commodity):
+    """Structured spec with raw numeric values for fob_excel.build_xlsx."""
+    months = M.MONTHS
+    df = st.session_state[f"cif_{commodity}"]
+    cif_row = {m: _safe(df.loc[m, "CIF"]) for m in months}
+    fut_row = {m: _safe(df.loc[m, "Futures"]) for m in months}
+    fbr = {r: {m: _safe(st.session_state.freight.loc[r, m]) for m in months}
+           for r in M.FREIGHT_REGIONS}
+    contracts = (st.session_state.get(f"contracts_{commodity}")
+                 or list(M.CONTRACTS[commodity]))
+    cdf = st.session_state[f"carry_{commodity}"]
+    labels = M.spread_labels_for(commodity)
+    spreads = [cdf.loc["Spread", l] if l in cdf.columns else None for l in labels]
+    fullcarry = M.compute_full_carry(
+        commodity, fut_row, st.session_state.interest_pct / 100.0,
+        st.session_state[f"storage_{commodity}"])
+    cashc = st.session_state[f"cashc_{commodity}"]
+    grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
+    cfg = M.CARRY_CONFIG[commodity]
+
+    rows = [
+        ("banner", commodity, None),
+        ("months", "", list(months)),
+        ("contracts", "", list(contracts[:len(months)])),
+        ("cbot", "CBOT", [_xnum(fut_row[m]) for m in months]),
+        ("cif", "CIF", [_xnum(cif_row[m]) for m in months]),
+        ("section", "Cash vs Delivery", None),
+    ]
+    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cashc, months)
+    rows.append(("cash", cfg["cash_label"], [_xnum(v) for v in cash]))
+    for item in M.BLOCK_LAYOUT:
+        if item[0] == "reach":
+            rows.append(("section", item[1], None))
+        elif item[0] == "freight":
+            _, region, label = item
+            fr = fbr.get(region, {})
+            rows.append(("freight", label, [_xnum(fr.get(m)) for m in months]))
+        else:
+            loc = item[1]
+            rows.append(("fob", f"FOB Barge {loc}",
+                         [_xnum(grid[loc].get(m)) for m in months]))
+
+    rows.append(("section", "Spreads · Carry", None))
+    n = len(labels)
+    pad = max(0, len(months) - 2 * n)
+    scells = [None] * pad
+    for i in range(n):
+        scells.append(labels[i])
+        scells.append(_xnum(spreads[i]))
+    scells = (scells + [None] * len(months))[:len(months)]
+    rows.append(("spread", "Spreads", scells))
+    carry = M.pct_full_carry(spreads, fullcarry)
+    ccells = [None] * len(months)
+    for i in range(n):
+        pos = pad + 2 * i + 1
+        if pos < len(ccells) and i < len(carry):
+            ccells[pos] = _xnum(carry[i])
+    rows.append(("carry", "% Full Carry", ccells))
+    for label, loc in cfg["top_carry"]:
+        rows.append(("topcarry", label,
+                     [_xnum(v) for v in M.top_carry(commodity, grid[loc], spreads)]))
+
+    return {"commodity": commodity, "months": list(months), "rows": rows}
+
+
+def build_fob_xlsx(as_of):
+    """One-sheet workbook (tab = date) with Corn, Soybeans, Wheat stacked."""
+    sheets = [_build_excel_sheet(c) for c in M.COMMODITIES]
+    return fob_excel.build_xlsx(as_of, sheets)
 
 
 def _dir_cls(cur, prior):
@@ -1689,6 +1766,19 @@ with st.sidebar:
                 st.error(f"Couldn't save to the FOB folder: {e}")
     except Exception as e:  # never let export break the app
         st.caption(f"PDF export unavailable: {e}")
+
+    _xlsx_name = (f"JSA FOB Sheet {as_of.month}-{as_of.day}-"
+                  f"{as_of.year % 100}.xlsx")
+    try:
+        st.download_button(
+            "📊 Download FOB Sheet (Excel)", data=build_fob_xlsx(as_of),
+            file_name=_xlsx_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            help="One workbook, tab named by date: Corn, Soybeans, Wheat stacked "
+                 "with a blank row between each.")
+    except Exception as e:
+        st.caption(f"Excel export unavailable: {e}")
 
 # --- tabs: Inputs + the three commodity sheets ----------------------------
 if HIST_DATE:
