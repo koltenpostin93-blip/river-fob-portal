@@ -24,6 +24,7 @@ import fob_model as M
 import seed_data as S
 import db
 import paste_parse
+import fob_pdf
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -601,6 +602,91 @@ def _carry_pct_cell(v):
         return "<td></td>"
     cls = ' class="neg"' if v < 0 else ""
     return f"<td{cls}>{v * 100:.0f}%</td>"
+
+
+# --- PDF export ------------------------------------------------------------
+def _fnum(v, dec):
+    """(text, is_negative) for the PDF — negatives shown in (parens)."""
+    if v is None or pd.isna(v):
+        return ("", False)
+    if v < 0:
+        return (f"({abs(v):.{dec}f})", True)
+    return (f"{v:.{dec}f}", False)
+
+
+def _build_pdf_sheet(commodity):
+    """Structured spec of one commodity's working sheet for fob_pdf.build_pdf."""
+    months = M.MONTHS
+    df = st.session_state[f"cif_{commodity}"]
+    cif_row = {m: _safe(df.loc[m, "CIF"]) for m in months}
+    fut_row = {m: _safe(df.loc[m, "Futures"]) for m in months}
+    fbr = {r: {m: _safe(st.session_state.freight.loc[r, m]) for m in months}
+           for r in M.FREIGHT_REGIONS}
+    contracts = (st.session_state.get(f"contracts_{commodity}")
+                 or list(M.CONTRACTS[commodity]))
+    cdf = st.session_state[f"carry_{commodity}"]
+    labels = M.spread_labels_for(commodity)
+    spreads = [cdf.loc["Spread", l] if l in cdf.columns else None for l in labels]
+    fullcarry = M.compute_full_carry(
+        commodity, fut_row, st.session_state.interest_pct / 100.0,
+        st.session_state[f"storage_{commodity}"])
+    cashc = st.session_state[f"cashc_{commodity}"]
+    grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
+    cfg = M.CARRY_CONFIG[commodity]
+
+    rows = []
+    rows.append(("months", "", [(m, False) for m in months]))
+    rows.append(("contracts", "", [(c, False) for c in contracts[:len(months)]]))
+    rows.append(("cbot", "CBOT", [(_num(fut_row[m], 4), False) for m in months]))
+    rows.append(("cif", "CIF", [_fnum(cif_row[m], 2) for m in months]))
+    rows.append(("section", "Cash vs Delivery", None))
+    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cashc, months)
+    rows.append(("cash", cfg["cash_label"], [_fnum(v, 2) for v in cash]))
+
+    for item in M.BLOCK_LAYOUT:
+        if item[0] == "reach":
+            rows.append(("section", item[1], None))
+        elif item[0] == "freight":
+            _, region, label = item
+            fr = fbr.get(region, {})
+            rows.append(("freight", label,
+                         [(_pct(fr.get(m)), False) for m in months]))
+        else:
+            loc = item[1]
+            rows.append(("fob", f"FOB Barge {loc}",
+                         [_fnum(grid[loc].get(m), 2) for m in months]))
+
+    # Spreads · Carry — label/value pairs across the trailing columns (as on screen)
+    rows.append(("section", "Spreads · Carry", None))
+    n = len(labels)
+    pad = max(0, len(months) - 2 * n)
+    scells = [("", False)] * pad
+    for i in range(n):
+        scells.append((labels[i], False))
+        scells.append(_fnum(spreads[i], 4))
+    scells = (scells + [("", False)] * len(months))[:len(months)]
+    rows.append(("spread", "Spreads", scells))
+
+    carry = M.pct_full_carry(spreads, fullcarry)
+    ccells = [("", False)] * len(months)
+    for i in range(n):
+        pos = pad + 2 * i + 1
+        if pos < len(ccells) and i < len(carry) and carry[i] is not None \
+                and not pd.isna(carry[i]):
+            ccells[pos] = (f"{carry[i] * 100:.0f}%", carry[i] < 0)
+    rows.append(("carry", "% Full Carry", ccells))
+
+    for label, loc in cfg["top_carry"]:
+        tc = M.top_carry(commodity, grid[loc], spreads)
+        rows.append(("topcarry", label, [_fnum(v, 2) for v in tc]))
+
+    return {"commodity": commodity, "months": list(months), "rows": rows}
+
+
+def build_fob_pdf(as_of):
+    """3-page PDF (Corn, Soybeans, Wheat) of the current working sheets."""
+    sheets = [_build_pdf_sheet(c) for c in M.COMMODITIES]
+    return fob_pdf.build_pdf(as_of, sheets)
 
 
 def _dir_cls(cur, prior):
@@ -1569,6 +1655,40 @@ if HIST_DATE:
         view_date = dt.date.fromisoformat(HIST_DATE)
         st.info(f"📅 Viewing archived snapshot for **{view_date:%A, %B %d, %Y}** — "
                 "read-only · FOB recomputed from stored CIF + freight.")
+
+# Where "Save to FOB folder" writes (the SharePoint-synced 2026 folder).
+FOB_SAVE_DIR = os.environ.get(
+    "FOB_SAVE_DIR",
+    r"C:\Users\KoltenPostin\John Stewart and Associates"
+    r"\JSA - Documents\St. Louis\JSA FOB Sheet\2026")
+
+
+# --- sidebar export (defined here so the PDF helpers exist) ----------------
+with st.sidebar:
+    st.divider()
+    st.subheader("Export")
+    # Filename like "JSA FOB Sheet 7-7-26.pdf" (no leading zeros, 2-digit year).
+    _pdf_name = (f"JSA FOB Sheet {as_of.month}-{as_of.day}-"
+                 f"{as_of.year % 100}.pdf")
+    try:
+        _pdf_bytes = build_fob_pdf(as_of)
+        st.download_button(
+            "📄 Download FOB Sheet (PDF)", data=_pdf_bytes,
+            file_name=_pdf_name, mime="application/pdf",
+            use_container_width=True,
+            help="One PDF: Corn (p1), Soybeans (p2), Wheat (p3) — the current "
+                 "working sheet for the as-of date.")
+        if st.button("💾 Save to FOB 2026 folder", use_container_width=True,
+                     help=f"Writes {_pdf_name} to {FOB_SAVE_DIR}"):
+            try:
+                _path = os.path.join(FOB_SAVE_DIR, _pdf_name)
+                with open(_path, "wb") as _f:
+                    _f.write(_pdf_bytes)
+                st.success(f"Saved to:\n{_path}")
+            except OSError as e:
+                st.error(f"Couldn't save to the FOB folder: {e}")
+    except Exception as e:  # never let export break the app
+        st.caption(f"PDF export unavailable: {e}")
 
 # --- tabs: Inputs + the three commodity sheets ----------------------------
 if HIST_DATE:
