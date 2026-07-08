@@ -615,9 +615,27 @@ def _fnum(v, dec):
     return (f"{v:.{dec}f}", False)
 
 
-def _build_pdf_sheet(commodity):
-    """Structured spec of one commodity's working sheet for fob_pdf.build_pdf."""
-    months = M.MONTHS
+def _sheet_source(commodity, hist):
+    """Resolve the sheet's inputs from either an archived snapshot or the live
+    working state. Returns everything the exporters need. For archived dates the
+    snapshot holds only CIF + freight (+ its own months/contracts), so futures,
+    spreads and % Full Carry aren't available — `historical` flags that.
+
+    hist: (cif_by_commodity, freight_by_region, calendar) or None for live.
+    """
+    cashc = st.session_state[f"cashc_{commodity}"]
+    if hist is not None:
+        cif, frt, cal = hist
+        cols = (cal or {}).get(commodity)
+        months = [m for m, _ in cols] if cols else list(M.MONTHS)
+        contracts = [c for _, c in cols] if cols else list(M.CONTRACTS[commodity])
+        cif_row = cif.get(commodity) or {}
+        fbr = {r: (frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
+        grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
+        return dict(months=months, contracts=contracts, cif_row=cif_row,
+                    fut_row={}, fbr=fbr, grid=grid, spreads=[], fullcarry=[],
+                    labels=[], cashc=cashc, historical=True)
+    months = list(M.MONTHS)
     df = st.session_state[f"cif_{commodity}"]
     cif_row = {m: _safe(df.loc[m, "CIF"]) for m in months}
     fut_row = {m: _safe(df.loc[m, "Futures"]) for m in months}
@@ -631,17 +649,27 @@ def _build_pdf_sheet(commodity):
     fullcarry = M.compute_full_carry(
         commodity, fut_row, st.session_state.interest_pct / 100.0,
         st.session_state[f"storage_{commodity}"])
-    cashc = st.session_state[f"cashc_{commodity}"]
     grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
-    cfg = M.CARRY_CONFIG[commodity]
+    return dict(months=months, contracts=contracts, cif_row=cif_row,
+                fut_row=fut_row, fbr=fbr, grid=grid, spreads=spreads,
+                fullcarry=fullcarry, labels=labels, cashc=cashc,
+                historical=False)
 
-    rows = []
-    rows.append(("months", "", [(m, False) for m in months]))
-    rows.append(("contracts", "", [(c, False) for c in contracts[:len(months)]]))
-    rows.append(("cbot", "CBOT", [(_num(fut_row[m], 4), False) for m in months]))
-    rows.append(("cif", "CIF", [_fnum(cif_row[m], 2) for m in months]))
+
+def _build_pdf_sheet(commodity, hist=None):
+    """Structured spec of one commodity's sheet for fob_pdf.build_pdf."""
+    s = _sheet_source(commodity, hist)
+    months, cfg = s["months"], M.CARRY_CONFIG[commodity]
+    grid, fbr = s["grid"], s["fbr"]
+
+    rows = [("months", "", [(m, False) for m in months]),
+            ("contracts", "", [(c, False) for c in s["contracts"][:len(months)]])]
+    if not s["historical"]:
+        rows.append(("cbot", "CBOT",
+                     [(_num(s["fut_row"].get(m), 4), False) for m in months]))
+    rows.append(("cif", "CIF", [_fnum(s["cif_row"].get(m), 2) for m in months]))
     rows.append(("section", "Cash vs Delivery", None))
-    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cashc, months)
+    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], s["cashc"], months)
     rows.append(("cash", cfg["cash_label"], [_fnum(v, 2) for v in cash]))
 
     for item in M.BLOCK_LAYOUT:
@@ -657,36 +685,38 @@ def _build_pdf_sheet(commodity):
             rows.append(("fob", f"FOB Barge {loc}",
                          [_fnum(grid[loc].get(m), 2) for m in months]))
 
-    # Spreads · Carry — label/value pairs across the trailing columns (as on screen)
-    rows.append(("section", "Spreads · Carry", None))
-    n = len(labels)
-    pad = max(0, len(months) - 2 * n)
-    scells = [("", False)] * pad
-    for i in range(n):
-        scells.append((labels[i], False))
-        scells.append(_fnum(spreads[i], 4))
-    scells = (scells + [("", False)] * len(months))[:len(months)]
-    rows.append(("spread", "Spreads", scells))
+    if not s["historical"]:
+        labels, spreads = s["labels"], s["spreads"]
+        rows.append(("section", "Spreads · Carry", None))
+        n = len(labels)
+        pad = max(0, len(months) - 2 * n)
+        scells = [("", False)] * pad
+        for i in range(n):
+            scells.append((labels[i], False))
+            scells.append(_fnum(spreads[i], 4))
+        scells = (scells + [("", False)] * len(months))[:len(months)]
+        rows.append(("spread", "Spreads", scells))
 
-    carry = M.pct_full_carry(spreads, fullcarry)
-    ccells = [("", False)] * len(months)
-    for i in range(n):
-        pos = pad + 2 * i + 1
-        if pos < len(ccells) and i < len(carry) and carry[i] is not None \
-                and not pd.isna(carry[i]):
-            ccells[pos] = (f"{carry[i] * 100:.0f}%", carry[i] < 0)
-    rows.append(("carry", "% Full Carry", ccells))
+        carry = M.pct_full_carry(spreads, s["fullcarry"])
+        ccells = [("", False)] * len(months)
+        for i in range(n):
+            pos = pad + 2 * i + 1
+            if pos < len(ccells) and i < len(carry) and carry[i] is not None \
+                    and not pd.isna(carry[i]):
+                ccells[pos] = (f"{carry[i] * 100:.0f}%", carry[i] < 0)
+        rows.append(("carry", "% Full Carry", ccells))
 
-    for label, loc in cfg["top_carry"]:
-        tc = M.top_carry(commodity, grid[loc], spreads)
-        rows.append(("topcarry", label, [_fnum(v, 2) for v in tc]))
+        for label, loc in cfg["top_carry"]:
+            tc = M.top_carry(commodity, grid[loc], spreads)
+            rows.append(("topcarry", label, [_fnum(v, 2) for v in tc]))
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
 
 
-def build_fob_pdf(as_of):
-    """3-page PDF (Corn, Soybeans, Wheat) of the current working sheets."""
-    sheets = [_build_pdf_sheet(c) for c in M.COMMODITIES]
+def build_fob_pdf(as_of, hist=None):
+    """3-page PDF (Corn, Soybeans, Wheat) — live working sheets, or an archived
+    snapshot when `hist` (cif, freight, calendar) is given."""
+    sheets = [_build_pdf_sheet(c, hist) for c in M.COMMODITIES]
     return fob_pdf.build_pdf(as_of, sheets)
 
 
@@ -695,35 +725,20 @@ def _xnum(v):
     return None if v is None or pd.isna(v) else float(v)
 
 
-def _build_excel_sheet(commodity):
+def _build_excel_sheet(commodity, hist=None):
     """Structured spec with raw numeric values for fob_excel.build_xlsx."""
-    months = M.MONTHS
-    df = st.session_state[f"cif_{commodity}"]
-    cif_row = {m: _safe(df.loc[m, "CIF"]) for m in months}
-    fut_row = {m: _safe(df.loc[m, "Futures"]) for m in months}
-    fbr = {r: {m: _safe(st.session_state.freight.loc[r, m]) for m in months}
-           for r in M.FREIGHT_REGIONS}
-    contracts = (st.session_state.get(f"contracts_{commodity}")
-                 or list(M.CONTRACTS[commodity]))
-    cdf = st.session_state[f"carry_{commodity}"]
-    labels = M.spread_labels_for(commodity)
-    spreads = [cdf.loc["Spread", l] if l in cdf.columns else None for l in labels]
-    fullcarry = M.compute_full_carry(
-        commodity, fut_row, st.session_state.interest_pct / 100.0,
-        st.session_state[f"storage_{commodity}"])
-    cashc = st.session_state[f"cashc_{commodity}"]
-    grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
-    cfg = M.CARRY_CONFIG[commodity]
+    s = _sheet_source(commodity, hist)
+    months, cfg = s["months"], M.CARRY_CONFIG[commodity]
+    grid, fbr = s["grid"], s["fbr"]
 
-    rows = [
-        ("banner", commodity, None),
-        ("months", "", list(months)),
-        ("contracts", "", list(contracts[:len(months)])),
-        ("cbot", "CBOT", [_xnum(fut_row[m]) for m in months]),
-        ("cif", "CIF", [_xnum(cif_row[m]) for m in months]),
-        ("section", "Cash vs Delivery", None),
-    ]
-    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], cashc, months)
+    rows = [("banner", commodity, None),
+            ("months", "", list(months)),
+            ("contracts", "", list(s["contracts"][:len(months)]))]
+    if not s["historical"]:
+        rows.append(("cbot", "CBOT", [_xnum(s["fut_row"].get(m)) for m in months]))
+    rows.append(("cif", "CIF", [_xnum(s["cif_row"].get(m)) for m in months]))
+    rows.append(("section", "Cash vs Delivery", None))
+    cash = M.cash_vs_delivery(commodity, grid[cfg["cash_loc"]], s["cashc"], months)
     rows.append(("cash", cfg["cash_label"], [_xnum(v) for v in cash]))
     for item in M.BLOCK_LAYOUT:
         if item[0] == "reach":
@@ -737,32 +752,36 @@ def _build_excel_sheet(commodity):
             rows.append(("fob", f"FOB Barge {loc}",
                          [_xnum(grid[loc].get(m)) for m in months]))
 
-    rows.append(("section", "Spreads · Carry", None))
-    n = len(labels)
-    pad = max(0, len(months) - 2 * n)
-    scells = [None] * pad
-    for i in range(n):
-        scells.append(labels[i])
-        scells.append(_xnum(spreads[i]))
-    scells = (scells + [None] * len(months))[:len(months)]
-    rows.append(("spread", "Spreads", scells))
-    carry = M.pct_full_carry(spreads, fullcarry)
-    ccells = [None] * len(months)
-    for i in range(n):
-        pos = pad + 2 * i + 1
-        if pos < len(ccells) and i < len(carry):
-            ccells[pos] = _xnum(carry[i])
-    rows.append(("carry", "% Full Carry", ccells))
-    for label, loc in cfg["top_carry"]:
-        rows.append(("topcarry", label,
-                     [_xnum(v) for v in M.top_carry(commodity, grid[loc], spreads)]))
+    if not s["historical"]:
+        labels, spreads = s["labels"], s["spreads"]
+        rows.append(("section", "Spreads · Carry", None))
+        n = len(labels)
+        pad = max(0, len(months) - 2 * n)
+        scells = [None] * pad
+        for i in range(n):
+            scells.append(labels[i])
+            scells.append(_xnum(spreads[i]))
+        scells = (scells + [None] * len(months))[:len(months)]
+        rows.append(("spread", "Spreads", scells))
+        carry = M.pct_full_carry(spreads, s["fullcarry"])
+        ccells = [None] * len(months)
+        for i in range(n):
+            pos = pad + 2 * i + 1
+            if pos < len(ccells) and i < len(carry):
+                ccells[pos] = _xnum(carry[i])
+        rows.append(("carry", "% Full Carry", ccells))
+        for label, loc in cfg["top_carry"]:
+            rows.append(("topcarry", label,
+                         [_xnum(v) for v in M.top_carry(commodity, grid[loc],
+                                                        spreads)]))
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
 
 
-def build_fob_xlsx(as_of):
-    """One-sheet workbook (tab = date) with Corn, Soybeans, Wheat stacked."""
-    sheets = [_build_excel_sheet(c) for c in M.COMMODITIES]
+def build_fob_xlsx(as_of, hist=None):
+    """One-sheet workbook (tab = date) with Corn, Soybeans, Wheat stacked —
+    live working sheets, or an archived snapshot when `hist` is given."""
+    sheets = [_build_excel_sheet(c, hist) for c in M.COMMODITIES]
     return fob_excel.build_xlsx(as_of, sheets)
 
 
@@ -1744,17 +1763,25 @@ FOB_SAVE_DIR = os.environ.get(
 with st.sidebar:
     st.divider()
     st.subheader("Export")
-    # Filename like "JSA FOB Sheet 7-7-26.pdf" (no leading zeros, 2-digit year).
-    _pdf_name = (f"JSA FOB Sheet {as_of.month}-{as_of.day}-"
-                 f"{as_of.year % 100}.pdf")
+    # Export whatever's on screen: the selected archived snapshot, else live.
+    if HIST_DATE:
+        _exp_date = view_date
+        _exp_hist = (hist_cif, hist_frt, hist_cal)
+        st.caption(f"Exporting archived **{view_date:%m/%d/%y}** "
+                   "(CIF + freight + FOB; no CBOT/spreads — not stored).")
+    else:
+        _exp_date = as_of
+        _exp_hist = None
+        st.caption(f"Exporting the working sheet for **{as_of:%m/%d/%y}**.")
+    _base = f"JSA FOB Sheet {_exp_date.month}-{_exp_date.day}-{_exp_date.year % 100}"
+    _pdf_name, _xlsx_name = _base + ".pdf", _base + ".xlsx"
     try:
-        _pdf_bytes = build_fob_pdf(as_of)
+        _pdf_bytes = build_fob_pdf(_exp_date, hist=_exp_hist)
         st.download_button(
             "📄 Download FOB Sheet (PDF)", data=_pdf_bytes,
             file_name=_pdf_name, mime="application/pdf",
             use_container_width=True,
-            help="One PDF: Corn (p1), Soybeans (p2), Wheat (p3) — the current "
-                 "working sheet for the as-of date.")
+            help="One PDF: Corn (p1), Soybeans (p2), Wheat (p3).")
         if st.button("💾 Save to FOB 2026 folder", use_container_width=True,
                      help=f"Writes {_pdf_name} to {FOB_SAVE_DIR}"):
             try:
@@ -1767,11 +1794,10 @@ with st.sidebar:
     except Exception as e:  # never let export break the app
         st.caption(f"PDF export unavailable: {e}")
 
-    _xlsx_name = (f"JSA FOB Sheet {as_of.month}-{as_of.day}-"
-                  f"{as_of.year % 100}.xlsx")
     try:
         st.download_button(
-            "📊 Download FOB Sheet (Excel)", data=build_fob_xlsx(as_of),
+            "📊 Download FOB Sheet (Excel)",
+            data=build_fob_xlsx(_exp_date, hist=_exp_hist),
             file_name=_xlsx_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
