@@ -733,9 +733,8 @@ def _sheet_source(commodity, hist):
            for r in M.FREIGHT_REGIONS}
     contracts = (st.session_state.get(f"contracts_{commodity}")
                  or list(M.CONTRACTS[commodity]))
-    cdf = st.session_state[f"carry_{commodity}"]
     labels = M.spread_labels_for(commodity)
-    spreads = [cdf.loc["Spread", l] if l in cdf.columns else None for l in labels]
+    spreads = _live_spreads(commodity)      # derived from the CBOT futures row
     fullcarry = M.compute_full_carry(commodity, fut_row, interest, storage)
     grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
     return dict(months=months, contracts=contracts, cif_row=cif_row,
@@ -1604,16 +1603,35 @@ def _current_payloads():
     return cif, frt, cal
 
 
+def _live_spreads(commodity):
+    """Inter-contract spreads for the live sheet, derived straight from the CBOT
+    futures row (spread = front price − next price). Falls back to the manual
+    carry-editor value only where a futures leg is missing — so simply entering
+    or pasting the CBOT curve drives the Spreads / % Full Carry / Top Carry."""
+    fut_row = {m: _safe(st.session_state[f"cif_{commodity}"].loc[m, "Futures"])
+               for m in M.MONTHS}
+    labels = M.spread_labels_for(commodity)
+    derived = M.spreads_from_futures(commodity, fut_row)
+    cdf = st.session_state[f"carry_{commodity}"]
+    out = []
+    for i, l in enumerate(labels):
+        dv = derived[i] if i < len(derived) else None
+        if dv is not None:
+            out.append(dv)
+        elif l in cdf.columns:
+            out.append(_safe(cdf.loc["Spread", l]))
+        else:
+            out.append(None)
+    return out
+
+
 def _current_extras():
     """CBOT futures + inter-contract spreads, for archiving alongside inputs."""
     fut = {c: {m: _safe(st.session_state[f"cif_{c}"].loc[m, "Futures"])
                for m in M.MONTHS}
            for c in M.COMMODITIES}
-    spr = {}
-    for c in M.COMMODITIES:
-        cdf = st.session_state[f"carry_{c}"]
-        spr[c] = [(l, _safe(cdf.loc["Spread", l]))
-                  for l in M.spread_labels_for(c) if l in cdf.columns]
+    spr = {c: list(zip(M.spread_labels_for(c), _live_spreads(c)))
+           for c in M.COMMODITIES}
     return fut, spr
 
 
@@ -1825,7 +1843,9 @@ def render_inputs_tab(as_of):
                                for m in M.MONTHS},
                 key=f"cif_editor_{commodity}_{ver}")
             st.session_state[f"cif_{commodity}"] = ce.T
-            st.caption("Inter-contract spreads (manual until the futures feed). "
+            st.caption("Spreads auto-derive from the CBOT futures above "
+                       "(front price − next price) and drive the Top Carry curve. "
+                       "Edit here only to override when a futures leg is missing. "
                        "Full carry is computed from interest + storage.")
             cc = st.data_editor(
                 st.session_state[f"carry_{commodity}"], use_container_width=True,
@@ -2003,10 +2023,7 @@ else:
             fut_row = {m: df.loc[m, "Futures"] for m in M.MONTHS}
             fbr = {r: {m: st.session_state.freight.loc[r, m] for m in M.MONTHS}
                    for r in M.FREIGHT_REGIONS}
-            cdf = st.session_state[f"carry_{commodity}"]
-            labels = M.spread_labels_for(commodity)
-            spreads = [cdf.loc["Spread", l] if l in cdf.columns else None
-                       for l in labels]
+            spreads = _live_spreads(commodity)   # derived from the CBOT futures
             fullcarry = M.compute_full_carry(
                 commodity, fut_row,
                 st.session_state.interest_pct / 100.0,

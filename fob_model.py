@@ -293,6 +293,19 @@ def futures_by_contract(commodity, fut_row, contracts=None, months=None):
     return out
 
 
+def spreads_from_futures(commodity, fut_row, contracts=None, months=None):
+    """Inter-contract spreads implied by the CBOT futures row: for each
+    consecutive distinct-contract pair, price(front) - price(next). Returns None
+    for a pair when either leg's price is missing. One per spread label."""
+    fbc = futures_by_contract(commodity, fut_row, contracts, months)
+    dc = distinct_contracts(commodity, contracts)
+    out = []
+    for a, b in zip(dc, dc[1:]):
+        pa, pb = fbc.get(a), fbc.get(b)
+        out.append(None if pa is None or pb is None else round(pa - pb, 4))
+    return out
+
+
 def compute_full_carry(commodity, fut_row, interest_annual, storage_per_mo,
                        contracts=None, months=None):
     """Theoretical full carry per spread from interest + storage.
