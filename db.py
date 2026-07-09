@@ -174,6 +174,10 @@ def load_extras(as_of):
         for c, _seq, lbl, v in cur.fetchall():
             spr.setdefault(c, []).append((lbl, v))
         return fut, spr
+    except Exception:
+        # Tables may not exist yet on a DB initialised before this feature —
+        # degrade gracefully to "no extras" rather than crashing the app.
+        return {}, {}
     finally:
         conn.close()
 
