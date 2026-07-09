@@ -1039,9 +1039,11 @@ def _archived_carry(commodity, date_iso, loc, spreads):
     return M.top_carry(commodity, grid_d[loc], spreads)
 
 
-def render_carry_chart(commodity, grid, spreads, as_of=None, months=None):
+def render_carry_chart(commodity, grid, spreads, as_of=None, months=None,
+                       contracts=None, cur_label=None):
     """Top-of-carry (cash forward curve on spot futures) for a chosen location,
-    optionally overlaying the same curve from one or more archived dates."""
+    optionally overlaying the same curve from one or more archived dates.
+    `contracts` lets an archived date anchor to its own front contract."""
     months = months or M.MONTHS
     locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
     default = locs.index("STL") if "STL" in locs else 0
@@ -1061,9 +1063,11 @@ def render_carry_chart(commodity, grid, spreads, as_of=None, months=None):
     def _mdy(dd):
         return f"{dd.month}/{dd.day}/{dd.year % 100:02d}"
 
-    cur_label = f"Working ({_mdy(as_of)})" if as_of else "Working"
+    if cur_label is None:
+        cur_label = f"Working ({_mdy(as_of)})" if as_of else "Working"
     rows = []
-    tc = M.top_carry(commodity, grid[loc], spreads)
+    tc = M.top_carry(commodity, grid[loc], spreads, contracts=contracts,
+                     months=months)
     for m, v in zip(months, tc):
         if v is not None and not pd.isna(v):
             rows.append({"Month": m, "Carry": float(v), "Series": cur_label})
@@ -1948,10 +1952,14 @@ def _render_archived_commodity(commodity):
         st.session_state[f"storage_{commodity}"],
         contracts=contracts, months=months) if fut_row else [])
     prior = load_prior(commodity, HIST_DATE, cashc)
+    grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
     st.markdown(render_block(commodity, view_date, cif_row, fut_row, fbr,
                              spreads, fullcarry, cashc, historical=True,
                              contracts=contracts, months=months, prior=prior),
                 unsafe_allow_html=True)
+    st.markdown("##### 📈 Top of Carry")
+    render_carry_chart(commodity, grid, spreads, as_of=view_date, months=months,
+                       contracts=contracts, cur_label=f"{view_date:%m/%d/%y}")
 
 
 if VIEW_ONLY:
