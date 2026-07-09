@@ -2023,15 +2023,15 @@ if VIEW_ONLY:
     if not HIST_DATE or hist_cif is None:
         st.info("No archived data available to view yet.")
     else:
-        tabs = st.tabs(list(M.COMMODITIES) + ["📈 Seasonal", "📊 Changes"])
-        for tab, commodity in zip(tabs[:len(M.COMMODITIES)], M.COMMODITIES):
-            with tab:
-                _render_archived_commodity(commodity)
-        with tabs[len(M.COMMODITIES)]:
-            render_seasonal_tab()
-        with tabs[len(M.COMMODITIES) + 1]:
+        tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES) + ["📈 Seasonal"])
+        with tabs[0]:
             render_changes_tab(view_date, cur=(hist_cif, hist_frt),
                                allow_download=False)
+        for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
+            with tab:
+                _render_archived_commodity(commodity)
+        with tabs[-1]:
+            render_seasonal_tab()
 elif HIST_DATE:
     tabs = st.tabs(M.COMMODITIES + ["📈 Seasonal"])
     with tabs[-1]:
@@ -2040,14 +2040,14 @@ elif HIST_DATE:
         with tab:
             _render_archived_commodity(commodity)
 else:
-    tabs = st.tabs(["📝 Inputs"] + M.COMMODITIES + ["📈 Seasonal", "📊 Changes"])
+    tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES + ["📈 Seasonal"])
     with tabs[0]:
-        render_inputs_tab(as_of)
-    with tabs[-2]:
-        render_seasonal_tab()
-    with tabs[-1]:
         render_changes_tab(as_of)
-    for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
+    with tabs[1]:
+        render_inputs_tab(as_of)
+    with tabs[-1]:
+        render_seasonal_tab()
+    for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
             cif_row = {m: df.loc[m, "CIF"] for m in M.MONTHS}
