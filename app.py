@@ -212,6 +212,16 @@ st.markdown(
       .sheet td.down {{
         background-color: #ffebee; color: #c00000; font-weight: 700;
       }}
+      .sheet td.legend {{
+        text-align: center; font-size: 0.72rem; color: #555;
+        padding: 6px 8px; background: #fbfbfb; border-bottom: 1px solid #eee;
+      }}
+      .sheet td.legend .lg-sw {{
+        display: inline-block; width: 13px; height: 13px; border-radius: 3px;
+        vertical-align: middle; margin-right: 5px;
+      }}
+      .sheet td.legend .lg-sw.up {{ background: #e8f5e9; border: 1px solid #0d7f3d; }}
+      .sheet td.legend .lg-sw.dn {{ background: #ffebee; border: 1px solid #c00000; }}
       .sheet .chg {{
         display: block; font-weight: 600; color: #333;
       }}
@@ -919,6 +929,11 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     banner = f"background:linear-gradient(135deg,{c0},{c1});"
     reach_style = f"color:{c1};box-shadow:inset 3px 0 0 {c1};"
     rows = []
+    rows.append(
+        f'<tr><td class="legend" colspan="{ncol}">'
+        f'<span class="lg-sw up"></span>Green shade = daily move higher'
+        f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'
+        f'<span class="lg-sw dn"></span>Red shade = daily move lower</td></tr>')
     rows.append(f'<tr><td class="datebar" colspan="{ncol}">{as_of:%A, %B %d, %Y}</td></tr>')
     rows.append(f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{commodity}</td></tr>')
     # month + contract header rows (contract month is archived per column)
