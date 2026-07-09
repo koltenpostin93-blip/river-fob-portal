@@ -573,9 +573,8 @@ def _bump_editors():
     st.session_state.editor_ver += 1
 
 
-# Apply a date parsed from a pasted freight table (must run before the widget).
-if "pending_as_of" in st.session_state:
-    st.session_state["as_of_input"] = st.session_state.pop("pending_as_of")
+# (The As-of date is user-controlled; a pasted freight table no longer moves it.)
+st.session_state.pop("pending_as_of", None)
 
 # --- sidebar ---------------------------------------------------------------
 with st.sidebar:
@@ -1745,8 +1744,12 @@ def apply_pasted_tables(cif_text, frt_text, fut_text):
             st.session_state.freight = fdf
             msgs.append(f"Freight — filled {n} values across {len(res['freight'])} reaches.")
             if res.get("date"):
-                st.session_state["pending_as_of"] = res["date"]
-                msgs.append(f"As-of date set to {res['date']:%m/%d/%Y}.")
+                # Don't move the As-of date — barge-freight tables are usually
+                # dated the prior session, which kept bumping Save back a day.
+                # Just surface it so the user can set the date if they want.
+                msgs.append(f"(Freight table is dated {res['date']:%m/%d/%Y} — "
+                            "As-of date left unchanged; set it in the sidebar "
+                            "if you want to save under that date.)")
     if fut_text.strip():
         res, err = paste_parse.parse_futures(fut_text)
         if err:
