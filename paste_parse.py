@@ -107,30 +107,57 @@ def parse_freight(text):
 
 _COMM_LETTER = {"C": "Corn", "S": "Soybeans", "W": "Wheat"}
 _SYM_RE = re.compile(r"Z([CSW])([FGHJKMNQUVXZ])(\d{2})")
+_FRAC_RE = re.compile(r"^(\d+)[\-'’](\d)$")   # grain fractional: 427'6 = 427 6/8
+
+
+def _fut_price(tok):
+    """A futures price token -> float, or None. Accepts decimals and grain
+    fractional notation (427'6 or 427-6 = 427 and 6/8)."""
+    tok = str(tok).strip().replace(",", "").replace("$", "")
+    if not tok:
+        return None
+    m = _FRAC_RE.match(tok)
+    if m:
+        return int(m.group(1)) + int(m.group(2)) / 8.0
+    try:
+        return float(tok)
+    except ValueError:
+        return None
 
 
 def parse_futures(text):
     """-> ({commodity: {contract_letter: $/bu price}}) or (None, error).
 
-    Symbols like ZCN26 (corn July '26); Last is in cents, converted to $/bu.
+    Handles symbols like ZCN26 (corn July '26) whether the price is in the next
+    column, glued to the symbol, or on the same line separated by a single
+    space; decimals or grain fractionals (427'6). Cent quotes (>100) convert to
+    $/bu; dollar quotes are kept as-is.
     """
     out = {}
     for r in _rows(text):
-        if not r:
-            continue
-        m = _SYM_RE.match(r[0].upper())
-        if not m:
+        sym, tail = None, []
+        for i, cell in enumerate(r):
+            m = _SYM_RE.match(str(cell).strip().upper())
+            if m:
+                sym = m
+                after = str(cell).strip()[m.end():]     # price glued to symbol?
+                tail = ([after] if after else []) + list(r[i + 1:])
+                break
+        if not sym:
             continue
         price = None
-        for c in r[1:]:
-            try:
-                price = float(c.replace(",", ""))
+        for chunk in tail:
+            for piece in re.split(r"\s+", str(chunk).strip()):
+                price = _fut_price(piece)
+                if price is not None:
+                    break
+            if price is not None:
                 break
-            except ValueError:
-                continue
         if price is None:
             continue
-        out.setdefault(_COMM_LETTER[m.group(1)], {})[m.group(2)] = price / 100.0
+        if price > 100:                                  # cents -> $/bu
+            price /= 100.0
+        out.setdefault(_COMM_LETTER[sym.group(1)], {})[sym.group(2)] = round(price, 4)
     if not out:
         return None, "Couldn't find futures symbols like ZCN26."
     return {"futures": out}, None
