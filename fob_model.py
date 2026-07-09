@@ -211,17 +211,18 @@ CARRY_CONFIG = {
 }
 
 
-def contract_indices(commodity):
-    """0-based index of each month's contract among the distinct contracts."""
+def contract_indices(commodity, contracts=None):
+    """0-based index of each month's contract among the distinct contracts.
+    Pass `contracts` to use an archived date's chain instead of the live one."""
     seen, idx = [], []
-    for c in CONTRACTS[commodity]:
+    for c in (contracts or CONTRACTS[commodity]):
         if c not in seen:
             seen.append(c)
         idx.append(seen.index(c))
     return idx
 
 
-def spread_offsets(commodity, spreads):
+def spread_offsets(commodity, spreads, contracts=None):
     """Cumulative spread offset per month (sum of spreads before its contract).
 
     The window can hold more distinct contracts than there are spreads (e.g. a
@@ -230,7 +231,8 @@ def spread_offsets(commodity, spreads):
     cum = [0.0]
     for s in spreads:
         cum.append(cum[-1] + (s or 0.0))
-    return [cum[min(i, len(cum) - 1)] for i in contract_indices(commodity)]
+    return [cum[min(i, len(cum) - 1)]
+            for i in contract_indices(commodity, contracts)]
 
 
 def pct_full_carry(spreads, fullcarry):
@@ -246,28 +248,28 @@ CONTRACT_MONTH = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
                   "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12}
 
 
-def distinct_contracts(commodity):
+def distinct_contracts(commodity, contracts=None):
     """The distinct futures contracts in the window, in column order. Follows the
     active CONTRACTS, so if the front has rolled (e.g. SN -> SQ) the spot contract
-    and the whole chain roll with it."""
+    and the whole chain roll with it. Pass `contracts` for an archived chain."""
     seen = []
-    for c in CONTRACTS[commodity]:
+    for c in (contracts or CONTRACTS[commodity]):
         if c not in seen:
             seen.append(c)
     return seen
 
 
-def spread_labels_for(commodity):
+def spread_labels_for(commodity, contracts=None):
     """Inter-contract spread labels for the current distinct contracts, e.g.
     ['SQ/SX', 'SX/SF', 'SF/SH'] once the front has rolled to SQ. One fewer than
     the number of distinct contracts."""
-    dc = distinct_contracts(commodity)
+    dc = distinct_contracts(commodity, contracts)
     return [f"{dc[i]}/{dc[i + 1]}" for i in range(len(dc) - 1)]
 
 
-def spread_months(commodity):
+def spread_months(commodity, contracts=None):
     """Months between each consecutive contract pair (handles year wrap)."""
-    dc = distinct_contracts(commodity)
+    dc = distinct_contracts(commodity, contracts)
     out = []
     for a, b in zip(dc, dc[1:]):
         d = (CONTRACT_MONTH[b[-1]] - CONTRACT_MONTH[a[-1]]) % 12
@@ -275,26 +277,31 @@ def spread_months(commodity):
     return out
 
 
-def futures_by_contract(commodity, fut_row):
+def futures_by_contract(commodity, fut_row, contracts=None, months=None):
     """First futures price seen for each distinct contract."""
+    contracts = contracts or CONTRACTS[commodity]
+    months = months or MONTHS
     out = {}
-    for j, m in enumerate(MONTHS):
-        c = CONTRACTS[commodity][j]
+    for j, m in enumerate(months):
+        if j >= len(contracts):
+            break
+        c = contracts[j]
         if c not in out and fut_row.get(m) is not None:
             out[c] = fut_row[m]
     return out
 
 
-def compute_full_carry(commodity, fut_row, interest_annual, storage_per_mo):
+def compute_full_carry(commodity, fut_row, interest_annual, storage_per_mo,
+                       contracts=None, months=None):
     """Theoretical full carry per spread from interest + storage.
 
     full carry = months * (storage/bu/mo + front_price * annual_interest / 12)
     interest_annual is a decimal (e.g. 0.07).
     """
-    dc = distinct_contracts(commodity)
-    fbc = futures_by_contract(commodity, fut_row)
+    dc = distinct_contracts(commodity, contracts)
+    fbc = futures_by_contract(commodity, fut_row, contracts, months)
     out = []
-    for i, mo in enumerate(spread_months(commodity)):
+    for i, mo in enumerate(spread_months(commodity, contracts)):
         price = fbc.get(dc[i])
         if price is None:
             out.append(None)
@@ -325,13 +332,15 @@ def cash_vs_delivery(commodity, fob_row, cash_c, months=None):
     return vals
 
 
-def top_carry(commodity, fob_row, spreads):
-    """FOB(location) shifted to the spot (front) contract via spread offsets."""
-    off = spread_offsets(commodity, spreads)
+def top_carry(commodity, fob_row, spreads, contracts=None, months=None):
+    """FOB(location) shifted to the spot (front) contract via spread offsets.
+    Pass an archived chain/months to shift a historical date correctly."""
+    off = spread_offsets(commodity, spreads, contracts)
     out = []
-    for j, m in enumerate(MONTHS):
+    for j, m in enumerate(months or MONTHS):
         f = fob_row.get(m)
-        out.append(None if f is None else f - off[j])
+        off_j = off[j] if j < len(off) else (off[-1] if off else 0.0)
+        out.append(None if f is None else f - off_j)
     return out
 
 

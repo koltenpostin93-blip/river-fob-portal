@@ -617,24 +617,35 @@ def _fnum(v, dec):
 
 def _sheet_source(commodity, hist):
     """Resolve the sheet's inputs from either an archived snapshot or the live
-    working state. Returns everything the exporters need. For archived dates the
-    snapshot holds only CIF + freight (+ its own months/contracts), so futures,
-    spreads and % Full Carry aren't available — `historical` flags that.
+    working state. `has_futures` / `has_spreads` say whether the CBOT and
+    Spreads/Top-Carry sections can be shown (older snapshots stored only
+    CIF + freight; newer ones also carry futures + spreads).
 
-    hist: (cif_by_commodity, freight_by_region, calendar) or None for live.
+    hist: (cif, freight, calendar, futures, spreads) or None for live.
     """
     cashc = st.session_state[f"cashc_{commodity}"]
+    interest = st.session_state.interest_pct / 100.0
+    storage = st.session_state[f"storage_{commodity}"]
     if hist is not None:
-        cif, frt, cal = hist
+        cif, frt, cal, futures, spreads_hist = hist
         cols = (cal or {}).get(commodity)
         months = [m for m, _ in cols] if cols else list(M.MONTHS)
         contracts = [c for _, c in cols] if cols else list(M.CONTRACTS[commodity])
         cif_row = cif.get(commodity) or {}
         fbr = {r: (frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
+        fut_row = (futures or {}).get(commodity) or {}
+        pairs = (spreads_hist or {}).get(commodity) or []
+        labels = [l for l, _ in pairs]
+        spreads = [v for _, v in pairs]
+        fullcarry = (M.compute_full_carry(commodity, fut_row, interest, storage,
+                                          contracts=contracts, months=months)
+                     if fut_row else [])
         grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
         return dict(months=months, contracts=contracts, cif_row=cif_row,
-                    fut_row={}, fbr=fbr, grid=grid, spreads=[], fullcarry=[],
-                    labels=[], cashc=cashc, historical=True)
+                    fut_row=fut_row, fbr=fbr, grid=grid, spreads=spreads,
+                    fullcarry=fullcarry, labels=labels, cashc=cashc,
+                    has_futures=any(v is not None for v in fut_row.values()),
+                    has_spreads=bool(spreads))
     months = list(M.MONTHS)
     df = st.session_state[f"cif_{commodity}"]
     cif_row = {m: _safe(df.loc[m, "CIF"]) for m in months}
@@ -646,14 +657,12 @@ def _sheet_source(commodity, hist):
     cdf = st.session_state[f"carry_{commodity}"]
     labels = M.spread_labels_for(commodity)
     spreads = [cdf.loc["Spread", l] if l in cdf.columns else None for l in labels]
-    fullcarry = M.compute_full_carry(
-        commodity, fut_row, st.session_state.interest_pct / 100.0,
-        st.session_state[f"storage_{commodity}"])
+    fullcarry = M.compute_full_carry(commodity, fut_row, interest, storage)
     grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
     return dict(months=months, contracts=contracts, cif_row=cif_row,
                 fut_row=fut_row, fbr=fbr, grid=grid, spreads=spreads,
                 fullcarry=fullcarry, labels=labels, cashc=cashc,
-                historical=False)
+                has_futures=True, has_spreads=True)
 
 
 def _build_pdf_sheet(commodity, hist=None):
@@ -664,7 +673,7 @@ def _build_pdf_sheet(commodity, hist=None):
 
     rows = [("months", "", [(m, False) for m in months]),
             ("contracts", "", [(c, False) for c in s["contracts"][:len(months)]])]
-    if not s["historical"]:
+    if s["has_futures"]:
         rows.append(("cbot", "CBOT",
                      [(_num(s["fut_row"].get(m), 4), False) for m in months]))
     rows.append(("cif", "CIF", [_fnum(s["cif_row"].get(m), 2) for m in months]))
@@ -685,7 +694,7 @@ def _build_pdf_sheet(commodity, hist=None):
             rows.append(("fob", f"FOB Barge {loc}",
                          [_fnum(grid[loc].get(m), 2) for m in months]))
 
-    if not s["historical"]:
+    if s["has_spreads"]:
         labels, spreads = s["labels"], s["spreads"]
         rows.append(("section", "Spreads · Carry", None))
         n = len(labels)
@@ -707,7 +716,8 @@ def _build_pdf_sheet(commodity, hist=None):
         rows.append(("carry", "% Full Carry", ccells))
 
         for label, loc in cfg["top_carry"]:
-            tc = M.top_carry(commodity, grid[loc], spreads)
+            tc = M.top_carry(commodity, grid[loc], spreads,
+                             contracts=s["contracts"], months=months)
             rows.append(("topcarry", label, [_fnum(v, 2) for v in tc]))
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
@@ -734,7 +744,7 @@ def _build_excel_sheet(commodity, hist=None):
     rows = [("banner", commodity, None),
             ("months", "", list(months)),
             ("contracts", "", list(s["contracts"][:len(months)]))]
-    if not s["historical"]:
+    if s["has_futures"]:
         rows.append(("cbot", "CBOT", [_xnum(s["fut_row"].get(m)) for m in months]))
     rows.append(("cif", "CIF", [_xnum(s["cif_row"].get(m)) for m in months]))
     rows.append(("section", "Cash vs Delivery", None))
@@ -752,7 +762,7 @@ def _build_excel_sheet(commodity, hist=None):
             rows.append(("fob", f"FOB Barge {loc}",
                          [_xnum(grid[loc].get(m)) for m in months]))
 
-    if not s["historical"]:
+    if s["has_spreads"]:
         labels, spreads = s["labels"], s["spreads"]
         rows.append(("section", "Spreads · Carry", None))
         n = len(labels)
@@ -771,9 +781,9 @@ def _build_excel_sheet(commodity, hist=None):
                 ccells[pos] = _xnum(carry[i])
         rows.append(("carry", "% Full Carry", ccells))
         for label, loc in cfg["top_carry"]:
-            rows.append(("topcarry", label,
-                         [_xnum(v) for v in M.top_carry(commodity, grid[loc],
-                                                        spreads)]))
+            tc = M.top_carry(commodity, grid[loc], spreads,
+                             contracts=s["contracts"], months=months)
+            rows.append(("topcarry", label, [_xnum(v) for v in tc]))
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
 
@@ -841,9 +851,12 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     rows.append('<tr class="hdr"><td class="lbl"></td>' +
                 "".join(f"<td>{c or ''}</td>" for c in contracts) + "</tr>")
     prior = prior or {}
-    if not historical:
-        # CBOT (4dp, banded) — futures prices aren't archived, so live-only
-        rows.append(_data_row("CBOT", [fut_row[m] for m in months],
+    # CBOT + carry show whenever the data exists — live always, archived only
+    # for days saved with futures/spreads (older snapshots stored just CIF/frt).
+    show_cbot = bool(fut_row) and any(fut_row.get(m) is not None for m in months)
+    show_carry = bool(spreads) and any(s is not None for s in spreads)
+    if show_cbot:
+        rows.append(_data_row("CBOT", [fut_row.get(m) for m in months],
                               lambda v: _num(v, 4), band=True))
     p_cif = prior.get("cif", {})
     cif_cells = "".join(_dir_td(cif_row.get(m), p_cif.get(m), "cif") for m in months)
@@ -866,8 +879,8 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     # Spreads / Carry section (after Cash vs Delivery, before river reaches).
     # Labels + count follow the current contract chain (spreads roll with the
     # front), laid out label/value across the trailing columns.
-    if not historical:
-        labels = M.spread_labels_for(commodity)
+    if show_carry:
+        labels = M.spread_labels_for(commodity, contracts)
         n = len(labels)
         pad = max(0, len(months) - 2 * n)
         scells = ["<td></td>"] * pad
@@ -911,10 +924,11 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
         band = not band
 
     # Top Carry rows at the bottom (above the chart)
-    if not historical:
+    if show_carry:
         rows.append(f'<tr class="section"><td colspan="{ncol}">Top of Carry</td></tr>')
         for label, loc in cfg["top_carry"]:
-            tc = M.top_carry(commodity, grid[loc], spreads)
+            tc = M.top_carry(commodity, grid[loc], spreads,
+                             contracts=contracts, months=months)
             rows.append(f'<tr><td class="lbl">{label}</td>'
                         + "".join(_fob_cell(v) for v in tc) + "</tr>")
 
@@ -1497,9 +1511,24 @@ def _current_payloads():
     return cif, frt, cal
 
 
+def _current_extras():
+    """CBOT futures + inter-contract spreads, for archiving alongside inputs."""
+    fut = {c: {m: _safe(st.session_state[f"cif_{c}"].loc[m, "Futures"])
+               for m in M.MONTHS}
+           for c in M.COMMODITIES}
+    spr = {}
+    for c in M.COMMODITIES:
+        cdf = st.session_state[f"carry_{c}"]
+        spr[c] = [(l, _safe(cdf.loc["Spread", l]))
+                  for l in M.spread_labels_for(c) if l in cdf.columns]
+    return fut, spr
+
+
 def save_current(as_of):
     cif, frt, cal = _current_payloads()
-    return db.save_snapshot(as_of.isoformat(), cif, frt, cal)
+    fut, spr = _current_extras()
+    return db.save_snapshot(as_of.isoformat(), cif, frt, cal,
+                            futures=fut, spreads=spr)
 
 
 def _close(a, b):
@@ -1744,13 +1773,15 @@ view_date = as_of
 hist_cal = None
 if HIST_DATE:
     hist_cif, hist_frt, hist_cal = db.load_snapshot(HIST_DATE)
+    hist_fut, hist_spr = db.load_extras(HIST_DATE)
     if hist_cif is None:
         st.warning(f"No archived data found for {HIST_DATE}.")
         HIST_DATE = None
     else:
         view_date = dt.date.fromisoformat(HIST_DATE)
+        _extra = " (incl. CBOT + spreads)" if hist_fut else " (CIF + freight only)"
         st.info(f"📅 Viewing archived snapshot for **{view_date:%A, %B %d, %Y}** — "
-                "read-only · FOB recomputed from stored CIF + freight.")
+                f"read-only · FOB recomputed{_extra}.")
 
 # Where "Save to FOB folder" writes (the SharePoint-synced 2026 folder).
 FOB_SAVE_DIR = os.environ.get(
@@ -1766,9 +1797,10 @@ with st.sidebar:
     # Export whatever's on screen: the selected archived snapshot, else live.
     if HIST_DATE:
         _exp_date = view_date
-        _exp_hist = (hist_cif, hist_frt, hist_cal)
-        st.caption(f"Exporting archived **{view_date:%m/%d/%y}** "
-                   "(CIF + freight + FOB; no CBOT/spreads — not stored).")
+        _exp_hist = (hist_cif, hist_frt, hist_cal, hist_fut, hist_spr)
+        _note = ("full sheet" if hist_fut else "CIF + freight + FOB; "
+                 "no CBOT/spreads — not stored that day")
+        st.caption(f"Exporting archived **{view_date:%m/%d/%y}** ({_note}).")
     else:
         _exp_date = as_of
         _exp_hist = None
@@ -1815,13 +1847,23 @@ if HIST_DATE:
         with tab:
             cols = (hist_cal or {}).get(commodity)
             months = [m for m, _ct in cols] if cols else M.MONTHS
-            contracts = [ct for _m, ct in cols] if cols else None
+            contracts = ([ct for _m, ct in cols] if cols
+                         else list(M.CONTRACTS[commodity]))
             cif_row = hist_cif.get(commodity) or {}
             fbr = {r: (hist_frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
             cashc = st.session_state[f"cashc_{commodity}"]
+            # Stored futures + spreads (empty for days saved before this feature).
+            fut_row = (hist_fut or {}).get(commodity) or {}
+            spr_pairs = dict((hist_spr or {}).get(commodity) or [])
+            h_labels = M.spread_labels_for(commodity, contracts)
+            spreads = [spr_pairs.get(l) for l in h_labels]
+            fullcarry = (M.compute_full_carry(
+                commodity, fut_row, st.session_state.interest_pct / 100.0,
+                st.session_state[f"storage_{commodity}"],
+                contracts=contracts, months=months) if fut_row else [])
             prior = load_prior(commodity, HIST_DATE, cashc)
-            st.markdown(render_block(commodity, view_date, cif_row, {}, fbr,
-                                     [], [], cashc, historical=True,
+            st.markdown(render_block(commodity, view_date, cif_row, fut_row, fbr,
+                                     spreads, fullcarry, cashc, historical=True,
                                      contracts=contracts, months=months,
                                      prior=prior),
                         unsafe_allow_html=True)

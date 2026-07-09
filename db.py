@@ -75,21 +75,46 @@ def init_db():
                 contract TEXT,
                 PRIMARY KEY (as_of, commodity, seq)
             )""")
+        # CBOT futures (flat price per column) and the inter-contract spreads,
+        # captured going forward so historical days carry the full sheet
+        # (CBOT + Spreads + % Full Carry + Top Carry), not just CIF/freight.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS futures_history (
+                as_of TEXT NOT NULL,
+                commodity TEXT NOT NULL,
+                month TEXT NOT NULL,
+                value DOUBLE PRECISION,
+                PRIMARY KEY (as_of, commodity, month)
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS spreads_history (
+                as_of TEXT NOT NULL,
+                commodity TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                value DOUBLE PRECISION,
+                PRIMARY KEY (as_of, commodity, seq)
+            )""")
         conn.commit()
     finally:
         conn.close()
 
 
-def save_snapshot(as_of, cif_by_commodity, freight_by_region, calendar=None):
+def save_snapshot(as_of, cif_by_commodity, freight_by_region, calendar=None,
+                  futures=None, spreads=None):
     """Upsert one day's inputs. as_of is an ISO date string.
 
     calendar (optional): {commodity: [(month, contract), ...]} — the delivery
-    windows and the futures month associated with each column on that date.
+        windows and the futures month associated with each column on that date.
+    futures (optional): {commodity: {month: flat_price}} — the CBOT curve.
+    spreads (optional): {commodity: [(label, value), ...]} — inter-contract
+        spreads in order.
     """
     conn, ph = _connect()
     try:
         cur = conn.cursor()
-        for t in ("cif_history", "freight_history", "calendar_history"):
+        for t in ("cif_history", "freight_history", "calendar_history",
+                  "futures_history", "spreads_history"):
             cur.execute(f"DELETE FROM {t} WHERE as_of = {ph}", (as_of,))
         cif_rows = [(as_of, c, m, _f(v))
                     for c, mv in cif_by_commodity.items()
@@ -100,6 +125,12 @@ def save_snapshot(as_of, cif_by_commodity, freight_by_region, calendar=None):
         cal_rows = [(as_of, c, i, m, ct)
                     for c, cols in (calendar or {}).items()
                     for i, (m, ct) in enumerate(cols)]
+        fut_rows = [(as_of, c, m, _f(v))
+                    for c, mv in (futures or {}).items()
+                    for m, v in mv.items() if _f(v) is not None]
+        spr_rows = [(as_of, c, i, lbl, _f(v))
+                    for c, pairs in (spreads or {}).items()
+                    for i, (lbl, v) in enumerate(pairs) if _f(v) is not None]
         if cif_rows:
             cur.executemany(
                 f"INSERT INTO cif_history VALUES ({ph},{ph},{ph},{ph})", cif_rows)
@@ -109,8 +140,40 @@ def save_snapshot(as_of, cif_by_commodity, freight_by_region, calendar=None):
         if cal_rows:
             cur.executemany(
                 f"INSERT INTO calendar_history VALUES ({ph},{ph},{ph},{ph},{ph})", cal_rows)
+        if fut_rows:
+            cur.executemany(
+                f"INSERT INTO futures_history VALUES ({ph},{ph},{ph},{ph})", fut_rows)
+        if spr_rows:
+            cur.executemany(
+                f"INSERT INTO spreads_history VALUES ({ph},{ph},{ph},{ph},{ph})", spr_rows)
         conn.commit()
         return len(cif_rows), len(frt_rows)
+    finally:
+        conn.close()
+
+
+def load_extras(as_of):
+    """Return (futures, spreads) for a date, or ({}, {}) if none stored.
+
+    futures: {commodity: {month: value}};
+    spreads: {commodity: [(label, value), ...]} in order.
+    """
+    conn, ph = _connect()
+    try:
+        cur = conn.cursor()
+        fut = {}
+        cur.execute(
+            f"SELECT commodity, month, value FROM futures_history WHERE as_of = {ph}",
+            (as_of,))
+        for c, m, v in cur.fetchall():
+            fut.setdefault(c, {})[m] = v
+        spr = {}
+        cur.execute(
+            f"SELECT commodity, seq, label, value FROM spreads_history "
+            f"WHERE as_of = {ph} ORDER BY commodity, seq", (as_of,))
+        for c, _seq, lbl, v in cur.fetchall():
+            spr.setdefault(c, []).append((lbl, v))
+        return fut, spr
     finally:
         conn.close()
 
