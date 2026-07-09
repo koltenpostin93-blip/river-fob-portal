@@ -1611,7 +1611,10 @@ def _live_spreads(commodity):
     fut_row = {m: _safe(st.session_state[f"cif_{commodity}"].loc[m, "Futures"])
                for m in M.MONTHS}
     labels = M.spread_labels_for(commodity)
-    derived = M.spreads_from_futures(commodity, fut_row)
+    # getattr guard: survive a stale-module reload where spreads_from_futures
+    # isn't present yet (falls back to the manual carry values).
+    _sff = getattr(M, "spreads_from_futures", None)
+    derived = _sff(commodity, fut_row) if _sff else []
     cdf = st.session_state[f"carry_{commodity}"]
     out = []
     for i, l in enumerate(labels):
