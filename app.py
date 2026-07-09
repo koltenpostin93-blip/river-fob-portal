@@ -78,8 +78,8 @@ def _safe(v):
 
 
 @st.cache_data
-def _watermark_uri():
-    p = os.path.join(os.path.dirname(__file__), "assets", "jsa_50yr.png")
+def _asset_uri(filename):
+    p = os.path.join(os.path.dirname(__file__), "assets", filename)
     try:
         with open(p, "rb") as f:
             return "data:image/png;base64," + base64.b64encode(f.read()).decode()
@@ -87,7 +87,8 @@ def _watermark_uri():
         return ""
 
 
-WATERMARK = _watermark_uri()
+WATERMARK = _asset_uri("jsa_50yr.png")
+LOGO_URI = _asset_uri("logo-full.png")           # JSA wordmark (dark)
 
 # --- JPSI brand + smoothed sheet styling ----------------------------------
 JPSI_DARK = "#32373c"
@@ -121,25 +122,25 @@ st.markdown(
       .block-container {{ padding-top: 0.75rem !important; padding-bottom: 1rem !important; max-width: 1200px; }}
       .stApp {{ background-color: #ffffff; }}
 
-      /* Header banner */
-      .header-banner {{
+      /* Header — JSA logo left, centred title, blue underline (jpsi.com style) */
+      .dash-header {{
         background: #ffffff;
         border-bottom: 3px solid {JPSI_BLUE};
-        padding: 24px 0;
-        margin: -0.75rem 0 24px 0;
+        padding: 18px 8px 14px 8px;
+        margin: -0.75rem 0 22px 0;
+        display: flex;
+        align-items: center;
+        gap: 20px;
       }}
-      .header-banner h1 {{
-        margin: 0 0 4px 0;
-        font-size: 2rem;
-        color: {JPSI_DARK};
-        font-weight: 700;
-        letter-spacing: -0.5px;
+      .dash-header-logo {{ flex-shrink: 0; }}
+      .dash-header-logo img {{ height: 54px; display: block; }}
+      .dash-header-text {{ flex: 1; text-align: center; }}
+      .dash-header-text h1 {{
+        margin: 0; color: {JPSI_DARK} !important;
+        font-size: 1.7rem; font-weight: 700; letter-spacing: -0.01em;
       }}
-      .header-banner .subtitle {{
-        color: #666;
-        font-size: 0.95rem;
-        font-weight: 400;
-        margin: 0;
+      .dash-header-text .subtitle {{
+        color: #6b7280; font-size: 0.85rem; margin: 3px 0 0 0;
       }}
 
       /* Page title styling */
@@ -403,11 +404,18 @@ st.markdown(
     """, unsafe_allow_html=True
 )
 
+_logo_html = (f'<img src="{LOGO_URI}" alt="John Stewart &amp; Associates">'
+              if LOGO_URI else '')
 st.markdown(
-    '<div class="header-banner">'
-    '<h1>🏢 River FOB Values Portal</h1>'
-    '<div class="subtitle">John Stewart &amp; Associates • Agricultural Market Intelligence</div>'
-    '</div>',
+    f'<div class="dash-header">'
+    f'  <div class="dash-header-logo">{_logo_html}</div>'
+    f'  <div class="dash-header-text">'
+    f'    <h1>River FOB Values</h1>'
+    f'    <div class="subtitle">Commodity &amp; Ag Risk Management Specialists '
+    f'&nbsp;·&nbsp; est. 1976</div>'
+    f'  </div>'
+    f'  <div style="width:180px"></div>'  # spacer to keep the title centred
+    f'</div>',
     unsafe_allow_html=True,
 )
 
@@ -521,11 +529,14 @@ if "pending_as_of" in st.session_state:
 
 # --- sidebar ---------------------------------------------------------------
 with st.sidebar:
+    _logo_sb = (f'<img src="{LOGO_URI}" style="height:34px;margin-bottom:8px;" '
+                f'alt="JSA">' if LOGO_URI else
+                '<div style="font-weight:900;font-size:1.4rem;color:#0693e3;">JSA</div>')
     st.markdown(
-        '<div style="text-align: center; padding: 16px; border-bottom: 3px solid #0693e3; margin: -1rem -1rem 20px -1rem; background: rgba(6,147,227,0.08);">'
-        '<div style="font-weight: 900; font-size: 1.4rem; color: #0693e3; letter-spacing: 1px; margin-bottom: 4px;">JSA</div>'
-        '<h3 style="margin: 0; color: #32373c; font-size: 0.95rem; font-weight: 600;">River FOB Portal</h3>'
-        '<small style="color: #666; font-size: 0.8rem;">Market Intelligence</small>'
+        '<div style="text-align: center; padding: 14px 8px; border-bottom: 3px solid #0693e3; margin: -1rem -1rem 20px -1rem; background: rgba(6,147,227,0.06);">'
+        + _logo_sb +
+        '<h3 style="margin: 0; color: #32373c; font-size: 0.9rem; font-weight: 600;">River FOB Portal</h3>'
+        '<small style="color: #666; font-size: 0.78rem;">Commodity &amp; Ag Risk Management</small>'
         '</div>',
         unsafe_allow_html=True
     )
