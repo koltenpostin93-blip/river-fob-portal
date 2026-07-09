@@ -305,9 +305,12 @@ st.markdown(
         background: #ffffff;
         border-bottom: 1px solid #e2e8f0;
       }}
-      /* Force EVERY element inside a tab dark + opaque — bulletproof against
-         whichever element Streamlit paints the label on (p/span/div) and any
-         faded default styling on inactive tabs. */
+      /* Force EVERY element inside a tab dark + opaque. Uses the ARIA role
+         selector [role="tab"] (stable across Streamlit versions) plus baseweb,
+         and sets -webkit-text-fill-color (baseweb sets it, and it overrides
+         `color`, which is what made inactive labels faint). */
+      [role="tab"],
+      [role="tab"] *,
       .stTabs [data-baseweb="tab"],
       .stTabs [data-baseweb="tab"] * {{
         color: {JPSI_DARK} !important;
@@ -316,20 +319,20 @@ st.markdown(
         font-size: 14px !important;
         -webkit-text-fill-color: {JPSI_DARK} !important;
       }}
-      .stTabs [data-baseweb="tab"] {{
+      [role="tab"] {{
         padding: 8px 18px;
         border-radius: 0;
       }}
-      .stTabs [data-baseweb="tab"]:hover,
-      .stTabs [data-baseweb="tab"]:hover * {{
+      [role="tab"]:hover,
+      [role="tab"]:hover * {{
         color: {JPSI_BLUE} !important;
         -webkit-text-fill-color: {JPSI_BLUE} !important;
       }}
-      .stTabs [aria-selected="true"] {{
+      [role="tab"][aria-selected="true"] {{
         border-bottom: 3px solid {JPSI_BLUE} !important;
       }}
-      .stTabs [aria-selected="true"],
-      .stTabs [aria-selected="true"] * {{
+      [role="tab"][aria-selected="true"],
+      [role="tab"][aria-selected="true"] * {{
         color: #000000 !important;
         -webkit-text-fill-color: #000000 !important;
         font-weight: 800 !important;
