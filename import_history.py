@@ -118,7 +118,11 @@ def _canon_month(label):
 
 
 def parse_tab(ws):
-    """Return (cif, freight, calendar) for one dated worksheet, or None."""
+    """Return (cif, freight, calendar, futures) for one dated worksheet, or None.
+
+    futures = {commodity: {month: cbot_price}} — the CBOT row values, present
+    only when the workbook was saved with the Barchart add-in resolved (else the
+    cells read #NAME?/#NUM! and futures come back empty)."""
     # label column: A or B by where "FOB Barge" appears most
     a = sum(1 for r in range(1, 60) if "FOB Barge" in str(ws.cell(r, 1).value or ""))
     b = sum(1 for r in range(1, 60) if "FOB Barge" in str(ws.cell(r, 2).value or ""))
@@ -145,7 +149,7 @@ def parse_tab(ws):
                sections[i + 1][0] if i + 1 < len(sections) else ws.max_row + 1)
               for i in range(len(sections))]
 
-    cif, freight, calendar = {}, {}, {}
+    cif, freight, calendar, futures = {}, {}, {}, {}
     for start, commodity, end in bounds:
         cbot_r = next((r for r in range(start, end)
                        if str(ws.cell(r, lc).value or "").strip().upper() == "CBOT"), None)
@@ -191,6 +195,15 @@ def parse_tab(ws):
             continue
         calendar[commodity] = list(zip(months, contracts))
 
+        # CBOT futures row (only real when Barchart was resolved on save).
+        # Normalise to $/bu: some commodities' cells are in cents (e.g. soybeans
+        # 1108.75) while others are already dollars (corn 4.07) — a value over
+        # 100 is cents, so /100.
+        fut = {months[i]: _fut_dollars(ws.cell(cbot_r, c).value)
+               for i, c in enumerate(data_cols)}
+        if any(v is not None for v in fut.values()):
+            futures[commodity] = fut
+
         for r in range(start, end):
             lbl = str(ws.cell(r, lc).value or "").strip()
             if lbl.upper() == "CIF":
@@ -203,7 +216,31 @@ def parse_tab(ws):
                                     for i, c in enumerate(data_cols)}
     if not cif:
         return None
-    return cif, freight, calendar
+    return cif, freight, calendar, futures
+
+
+def spreads_from(futures, calendar):
+    """Build {commodity: [(label, value), ...]} from captured CBOT futures and
+    the tab's own contract chain — so archived days carry spreads too."""
+    out = {}
+    for c, fut in (futures or {}).items():
+        cols = (calendar or {}).get(c) or []
+        contracts = [ct for _m, ct in cols]
+        months = [m for m, _ct in cols]
+        vals = M.spreads_from_futures(c, fut, contracts=contracts, months=months)
+        labels = M.spread_labels_for(c, contracts)
+        pairs = [(l, v) for l, v in zip(labels, vals) if v is not None]
+        if pairs:
+            out[c] = pairs
+    return out
+
+
+def _fut_dollars(v):
+    """CBOT price as $/bu — cells over 100 are quoted in cents, so /100."""
+    v = _num(v)
+    if v is None:
+        return None
+    return round(v / 100.0, 4) if abs(v) > 100 else v
 
 
 def _num(v):
@@ -259,7 +296,7 @@ def run(commit):
           f"({min(parsed)} -> {max(parsed)}).")
     print(f"After sampling: {len(selected)} snapshots "
           f"({len(daily)} daily-recent, {len(selected) - len(daily)} weekly).")
-    locs = sorted({c for d, (cif, fr, cal) in parsed.items() for c in cif})
+    locs = sorted({c for d, (cif, fr, cal, fut) in parsed.items() for c in cif})
     print(f"Commodities seen: {locs}")
     if failures:
         print("\nFailures:")
@@ -276,8 +313,9 @@ def run(commit):
     db.init_db()
     written = 0
     for d in selected:
-        cif, freight, calendar = parsed[d]
-        db.save_snapshot(d.isoformat(), cif, freight, calendar)
+        cif, freight, calendar, futures = parsed[d]
+        db.save_snapshot(d.isoformat(), cif, freight, calendar,
+                         futures=futures, spreads=spreads_from(futures, calendar))
         written += 1
     print(f"\nCommitted {written} snapshots. Archive now spans "
           f"{min(db.list_dates())} -> {max(db.list_dates())} "

@@ -1671,17 +1671,27 @@ def saved_status(as_of):
 
 
 def load_into_inputs(date_iso):
-    """Pull a saved date's CIF + freight into the editable input state."""
-    lc, lf, _ = db.load_snapshot(date_iso)
+    """Pull a saved date's CIF + freight (+ stored CBOT futures and spreads, if
+    any) into the editable input state, so re-saving preserves them."""
+    lc, lf, lcal = db.load_snapshot(date_iso)
     if lc is None:
         return False
+    lfut, lspr = db.load_extras(date_iso)
     for c in M.COMMODITIES:
         cur = st.session_state[f"cif_{c}"]
         for m in M.MONTHS:
             v = (lc.get(c) or {}).get(m)
             if v is not None:
                 cur.loc[m, "CIF"] = v
+            fv = (lfut.get(c) or {}).get(m)
+            if fv is not None:
+                cur.loc[m, "Futures"] = fv
         st.session_state[f"cif_{c}"] = cur
+        # Restore stored spreads into the carry editor (labels may differ).
+        pairs = (lspr.get(c) or [])
+        if pairs:
+            st.session_state[f"carry_{c}"] = pd.DataFrame(
+                {lbl: [v] for lbl, v in pairs}, index=["Spread"])
     fdf = st.session_state.freight
     for r in M.FREIGHT_REGIONS:
         for m in M.MONTHS:

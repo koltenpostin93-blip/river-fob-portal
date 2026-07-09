@@ -127,14 +127,19 @@ def main():
             if not res:
                 log.warning("  tab %s (%s): parse failed — skipped.", tab, d)
                 continue
-            cif, freight, calendar = res
+            cif, freight, calendar, futures = res
             cif = {c: _fix_months(mv) for c, mv in cif.items()}
             freight = {r: _fix_months(mv) for r, mv in freight.items()}
             calendar = {c: _fix_calendar(cols) for c, cols in calendar.items()}
-            n_cif, n_frt = db.save_snapshot(d.isoformat(), cif, freight, calendar)
+            futures = {c: _fix_months(mv) for c, mv in futures.items()}
+            spreads = IH.spreads_from(futures, calendar)   # from CBOT if present
+            n_cif, n_frt = db.save_snapshot(
+                d.isoformat(), cif, freight, calendar,
+                futures=futures, spreads=spreads)
             months = [mm for mm, _ in calendar.get("Corn", [])]
-            log.info("  %-6s -> %s  months=%s  (%d CIF, %d freight)",
-                     tab, d, months, n_cif, n_frt)
+            log.info("  %-6s -> %s  months=%s  (%d CIF, %d freight, %s CBOT)",
+                     tab, d, months, n_cif, n_frt,
+                     "with" if futures else "no")
             saved += 1
         log.info("Imported %d/%d recent tabs. Archive latest: %s",
                  saved, len(recent), db.list_dates()[0])
