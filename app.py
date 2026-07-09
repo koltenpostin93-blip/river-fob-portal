@@ -527,6 +527,11 @@ def _bump_editors():
 if "pending_as_of" in st.session_state:
     st.session_state["as_of_input"] = st.session_state.pop("pending_as_of")
 
+# Read-only / share mode: append ?view=1 to the URL. Hides editing + downloads,
+# lets viewers browse the archived history of Corn/Soybeans/Wheat/Changes/Seasonal.
+VIEW_ONLY = str(st.query_params.get("view", "")).lower() in (
+    "1", "true", "yes", "read", "readonly", "view")
+
 # --- sidebar ---------------------------------------------------------------
 with st.sidebar:
     _logo_sb = (f'<img src="{LOGO_URI}" style="height:34px;margin-bottom:8px;" '
@@ -540,48 +545,66 @@ with st.sidebar:
         '</div>',
         unsafe_allow_html=True
     )
-    st.subheader("Snapshot")
-    as_of = st.date_input(
-        "As-of date", value=dt.date.today(), key="as_of_input",
-        help="The date the inputs represent and will save under. Can be a "
-             "future date when prepping the next sheet. Auto-set when you "
-             "paste a dated freight table.")
-    # Roll the working delivery window + contracts to the chosen as-of month
-    # (e.g. July drops June and adds February), then create/reindex the inputs.
-    M.MONTHS = M.months_for(as_of)
-    M.CONTRACTS = {c: M.contracts_for(c, as_of) for c in M.COMMODITIES}
-    _init_state()
-    _reindex_to_window()
-    # Honor a manually-rolled front captured from the pasted sheet, then align the
-    # spread editors to the resulting contract chain.
-    _apply_paste_contracts()
-    _reindex_carry()
-    st.caption(
-        f"Delivery window: **{M.MONTHS[0]} – {M.MONTHS[-1]}** (rolls with the "
-        "as-of month). Enter CIF & barge freight on the **📝 Inputs** tab — the "
-        "commodity tabs update live; *what-if* until you **Save**.")
-    st.markdown("**Full-carry assumptions**")
-    st.session_state.interest_pct = st.number_input(
-        "Annual interest rate (%)", value=float(st.session_state.interest_pct),
-        step=0.25, format="%.2f",
-        help="Used for % Full Carry; storage is per-commodity on the Inputs tab.")
-
-    st.divider()
-    st.subheader("Archive")
-    st.caption(f"CIF + barge freight · {DB_BACKEND}")
-    view_choice = st.selectbox(
-        "View archived date", ["✏️ Working (live)"] + db.list_dates(),
-        help="Pick a saved date to view its FOB sheet read-only. Choose "
-             "'Working (live)' to edit on the Inputs tab.")
-    if st.button("↺ Reset inputs to seed"):
-        for k in list(st.session_state.keys()):
-            if k.startswith(("freight", "cif_", "carry_", "cashc_", "storage_")):
-                del st.session_state[k]
+    if VIEW_ONLY:
+        # Read-only: just a date browser over the archived history.
+        _dates = db.list_dates()                       # newest first
+        st.subheader("History")
+        if _dates:
+            view_choice = st.selectbox(
+                "Viewing date", _dates, index=0,
+                help="Browse any archived day. This is a read-only view.")
+        else:
+            view_choice = None
+            st.info("No archived dates yet.")
+        as_of = (dt.date.fromisoformat(view_choice) if view_choice
+                 else dt.date.today())
+        M.MONTHS = M.months_for(as_of)
+        M.CONTRACTS = {c: M.contracts_for(c, as_of) for c in M.COMMODITIES}
         _init_state()
-        _bump_editors()
-        st.rerun()
+        st.caption("🔒 Read-only view — editing and downloads are disabled.")
+        HIST_DATE = view_choice
+    else:
+        st.subheader("Snapshot")
+        as_of = st.date_input(
+            "As-of date", value=dt.date.today(), key="as_of_input",
+            help="The date the inputs represent and will save under. Can be a "
+                 "future date when prepping the next sheet. Auto-set when you "
+                 "paste a dated freight table.")
+        # Roll the working delivery window + contracts to the chosen as-of month
+        # (e.g. July drops June and adds February), then create/reindex inputs.
+        M.MONTHS = M.months_for(as_of)
+        M.CONTRACTS = {c: M.contracts_for(c, as_of) for c in M.COMMODITIES}
+        _init_state()
+        _reindex_to_window()
+        # Honor a manually-rolled front captured from the pasted sheet, then
+        # align the spread editors to the resulting contract chain.
+        _apply_paste_contracts()
+        _reindex_carry()
+        st.caption(
+            f"Delivery window: **{M.MONTHS[0]} – {M.MONTHS[-1]}** (rolls with the "
+            "as-of month). Enter CIF & barge freight on the **📝 Inputs** tab — "
+            "the commodity tabs update live; *what-if* until you **Save**.")
+        st.markdown("**Full-carry assumptions**")
+        st.session_state.interest_pct = st.number_input(
+            "Annual interest rate (%)", value=float(st.session_state.interest_pct),
+            step=0.25, format="%.2f",
+            help="Used for % Full Carry; storage is per-commodity on the Inputs tab.")
 
-HIST_DATE = None if view_choice.startswith("✏️") else view_choice
+        st.divider()
+        st.subheader("Archive")
+        st.caption(f"CIF + barge freight · {DB_BACKEND}")
+        view_choice = st.selectbox(
+            "View archived date", ["✏️ Working (live)"] + db.list_dates(),
+            help="Pick a saved date to view its FOB sheet read-only. Choose "
+                 "'Working (live)' to edit on the Inputs tab.")
+        if st.button("↺ Reset inputs to seed"):
+            for k in list(st.session_state.keys()):
+                if k.startswith(("freight", "cif_", "carry_", "cashc_", "storage_")):
+                    del st.session_state[k]
+            _init_state()
+            _bump_editors()
+            st.rerun()
+        HIST_DATE = None if view_choice.startswith("✏️") else view_choice
 
 
 # --- formatting helpers ----------------------------------------------------
@@ -1398,8 +1421,14 @@ def _df_to_png(df, title):
         return None
 
 
-def render_changes_tab(as_of):
-    cur_cif, cur_frt, _ = _current_payloads()
+def render_changes_tab(as_of, cur=None, allow_download=True):
+    # cur = (cif, freight) to use as the "current" side (an archived snapshot in
+    # read-only mode); otherwise the live working inputs.
+    if cur is not None:
+        cur_cif, cur_frt = cur
+    else:
+        cur_cif, cur_frt, _ = _current_payloads()
+    cur_lbl = "selected date" if cur is not None else "working"
     dates = sorted(db.list_dates())
     before = [d for d in dates if d < as_of.isoformat()]
     pdaily = before[-1] if before else None
@@ -1421,65 +1450,69 @@ def render_changes_tab(as_of):
 
     # --- Daily: CIF + barge freight, vs prior day ---
     st.markdown("#### Daily Changes")
-    col1, col2 = st.columns([0.9, 0.1])
-    with col2:
-        daily_df = _build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt)
-        daily_png = _df_to_png(daily_df, "Daily Changes")
-        if daily_png:
-            st.download_button(
-                label="📥 PNG",
-                data=daily_png,
-                file_name=f"daily_changes_{as_of.isoformat()}.png",
-                mime="image/png"
-            )
+    if allow_download:
+        _c1, _c2 = st.columns([0.9, 0.1])
+        with _c2:
+            daily_png = _df_to_png(
+                _build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt),
+                "Daily Changes")
+            if daily_png:
+                st.download_button(
+                    label="📥 PNG", data=daily_png,
+                    file_name=f"daily_changes_{as_of.isoformat()}.png",
+                    mime="image/png")
 
     rows = [hdr("Daily Changes")]
     rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
     for c in M.COMMODITIES:
-        cells = "".join(_chg_cell(cur_cif[c].get(m), (d_cif.get(c) or {}).get(m), "num")
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (d_cif.get(c) or {}).get(m), "num")
                         for m in M.MONTHS)
         rows.append(f'<tr class="strong"><td class="lbl">{c}</td>{cells}</tr>')
     rows.append(f'<tr class="section"><td colspan="{ncol}">Barge Freight</td></tr>')
     for r in M.FREIGHT_REGIONS:
-        cells = "".join(_chg_cell(cur_frt[r].get(m), (d_frt.get(r) or {}).get(m), "pct")
+        cells = "".join(_chg_cell((cur_frt.get(r) or {}).get(m),
+                                  (d_frt.get(r) or {}).get(m), "pct")
                         for m in M.MONTHS)
         rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
     st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
                 unsafe_allow_html=True)
-    st.caption(f"Day-over-day: working values vs prior archived date "
+    st.caption(f"Day-over-day: {cur_lbl} values vs prior archived date "
                f"({pdaily or 'none'}).")
 
     # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
     st.markdown("#### Weekly Changes")
-    col1, col2 = st.columns([0.9, 0.1])
-    with col2:
-        weekly_df = _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt)
-        weekly_png = _df_to_png(weekly_df, "Weekly Changes")
-        if weekly_png:
-            st.download_button(
-                label="📥 PNG",
-                data=weekly_png,
-                file_name=f"weekly_changes_{as_of.isoformat()}.png",
-                mime="image/png"
-            )
+    if allow_download:
+        _c1, _c2 = st.columns([0.9, 0.1])
+        with _c2:
+            weekly_png = _df_to_png(
+                _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt),
+                "Weekly Changes")
+            if weekly_png:
+                st.download_button(
+                    label="📥 PNG", data=weekly_png,
+                    file_name=f"weekly_changes_{as_of.isoformat()}.png",
+                    mime="image/png")
 
     rows = [hdr("Weekly Changes")]
 
     # STL Freight once at the top
     rows.append(f'<tr class="section"><td colspan="{ncol}">STL Freight</td></tr>')
-    cells = "".join(_chg_cell(cur_frt["STL"].get(m), (w_frt.get("STL") or {}).get(m), "pct")
+    cells = "".join(_chg_cell((cur_frt.get("STL") or {}).get(m),
+                              (w_frt.get("STL") or {}).get(m), "pct")
                     for m in M.MONTHS)
     rows.append(f'<tr class="frt-row"><td class="lbl">—</td>{cells}</tr>')
 
     # CIF and FOB by commodity
     for c in M.COMMODITIES:
         rows.append(f'<tr class="section"><td colspan="{ncol}">{c}</td></tr>')
-        cur_fob = M.compute_fob_grid(c, cur_cif[c], cur_frt)["STL"]
+        cur_fob = M.compute_fob_grid(c, cur_cif.get(c) or {}, cur_frt)["STL"]
         w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
                  if w_cif.get(c) else {})
 
         # CIF
-        cells = "".join(_chg_cell(cur_cif[c].get(m), (w_cif.get(c) or {}).get(m), "num")
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (w_cif.get(c) or {}).get(m), "num")
                         for m in M.MONTHS)
         rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
 
@@ -1490,7 +1523,7 @@ def render_changes_tab(as_of):
 
     st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
                 unsafe_allow_html=True)
-    st.caption(f"Week-over-week: working values vs ~7 days ago "
+    st.caption(f"Week-over-week: {cur_lbl} values vs ~7 days ago "
                f"({pweek or 'none'}).")
 
 
@@ -1803,6 +1836,7 @@ FOB_SAVE_DIR = os.environ.get(
 
 # --- sidebar export (defined here so the PDF helpers exist) ----------------
 with st.sidebar:
+  if not VIEW_ONLY:                       # downloads hidden in read-only mode
     st.divider()
     st.subheader("Export")
     # Export whatever's on screen: the selected archived snapshot, else live.
@@ -1850,34 +1884,51 @@ with st.sidebar:
         st.caption(f"Excel export unavailable: {e}")
 
 # --- tabs: Inputs + the three commodity sheets ----------------------------
-if HIST_DATE:
+def _render_archived_commodity(commodity):
+    """Read-only sheet for the selected archived date (used by history views)."""
+    cols = (hist_cal or {}).get(commodity)
+    months = [m for m, _ct in cols] if cols else M.MONTHS
+    contracts = ([ct for _m, ct in cols] if cols
+                 else list(M.CONTRACTS[commodity]))
+    cif_row = (hist_cif or {}).get(commodity) or {}
+    fbr = {r: (hist_frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
+    cashc = st.session_state[f"cashc_{commodity}"]
+    # Stored futures + spreads (empty for days saved before this feature).
+    fut_row = (hist_fut or {}).get(commodity) or {}
+    spr_pairs = dict((hist_spr or {}).get(commodity) or [])
+    h_labels = M.spread_labels_for(commodity, contracts)
+    spreads = [spr_pairs.get(l) for l in h_labels]
+    fullcarry = (M.compute_full_carry(
+        commodity, fut_row, st.session_state.interest_pct / 100.0,
+        st.session_state[f"storage_{commodity}"],
+        contracts=contracts, months=months) if fut_row else [])
+    prior = load_prior(commodity, HIST_DATE, cashc)
+    st.markdown(render_block(commodity, view_date, cif_row, fut_row, fbr,
+                             spreads, fullcarry, cashc, historical=True,
+                             contracts=contracts, months=months, prior=prior),
+                unsafe_allow_html=True)
+
+
+if VIEW_ONLY:
+    if not HIST_DATE or hist_cif is None:
+        st.info("No archived data available to view yet.")
+    else:
+        tabs = st.tabs(list(M.COMMODITIES) + ["📈 Seasonal", "📊 Changes"])
+        for tab, commodity in zip(tabs[:len(M.COMMODITIES)], M.COMMODITIES):
+            with tab:
+                _render_archived_commodity(commodity)
+        with tabs[len(M.COMMODITIES)]:
+            render_seasonal_tab()
+        with tabs[len(M.COMMODITIES) + 1]:
+            render_changes_tab(view_date, cur=(hist_cif, hist_frt),
+                               allow_download=False)
+elif HIST_DATE:
     tabs = st.tabs(M.COMMODITIES + ["📈 Seasonal"])
     with tabs[-1]:
         render_seasonal_tab()
     for tab, commodity in zip(tabs[:len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
-            cols = (hist_cal or {}).get(commodity)
-            months = [m for m, _ct in cols] if cols else M.MONTHS
-            contracts = ([ct for _m, ct in cols] if cols
-                         else list(M.CONTRACTS[commodity]))
-            cif_row = hist_cif.get(commodity) or {}
-            fbr = {r: (hist_frt.get(r) or {}) for r in M.FREIGHT_REGIONS}
-            cashc = st.session_state[f"cashc_{commodity}"]
-            # Stored futures + spreads (empty for days saved before this feature).
-            fut_row = (hist_fut or {}).get(commodity) or {}
-            spr_pairs = dict((hist_spr or {}).get(commodity) or [])
-            h_labels = M.spread_labels_for(commodity, contracts)
-            spreads = [spr_pairs.get(l) for l in h_labels]
-            fullcarry = (M.compute_full_carry(
-                commodity, fut_row, st.session_state.interest_pct / 100.0,
-                st.session_state[f"storage_{commodity}"],
-                contracts=contracts, months=months) if fut_row else [])
-            prior = load_prior(commodity, HIST_DATE, cashc)
-            st.markdown(render_block(commodity, view_date, cif_row, fut_row, fbr,
-                                     spreads, fullcarry, cashc, historical=True,
-                                     contracts=contracts, months=months,
-                                     prior=prior),
-                        unsafe_allow_html=True)
+            _render_archived_commodity(commodity)
 else:
     tabs = st.tabs(["📝 Inputs"] + M.COMMODITIES + ["📈 Seasonal", "📊 Changes"])
     with tabs[0]:
