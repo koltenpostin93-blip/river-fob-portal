@@ -296,16 +296,29 @@ st.markdown(
         border-bottom: 1px solid #e2e8f0;
       }}
       .stTabs [data-baseweb="tab"] {{
-        color: #000000;
-        font-size: 13px;
+        color: {JPSI_DARK} !important;
+        font-size: 14px;
         padding: 8px 18px;
-        font-weight: 600;
+        font-weight: 600 !important;
         border-radius: 0;
+        opacity: 1 !important;
       }}
+      /* Streamlit paints the label on the inner <p>/markdown — force it dark
+         and fully opaque so inactive tabs aren't faint. */
+      .stTabs [data-baseweb="tab"] p,
+      .stTabs [data-baseweb="tab"] [data-testid="stMarkdownContainer"] {{
+        color: {JPSI_DARK} !important;
+        font-weight: 600 !important;
+        opacity: 1 !important;
+        font-size: 14px;
+      }}
+      .stTabs [data-baseweb="tab"]:hover p {{ color: {JPSI_BLUE} !important; }}
       .stTabs [aria-selected="true"] {{
-        color: #000000 !important;
-        font-weight: 700 !important;
         border-bottom: 3px solid {JPSI_BLUE} !important;
+      }}
+      .stTabs [aria-selected="true"] p {{
+        color: {JPSI_DARK} !important;
+        font-weight: 700 !important;
       }}
       .stTabs [data-baseweb="tab-panel"] {{
         padding-top: 8px !important;
