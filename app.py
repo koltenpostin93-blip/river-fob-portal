@@ -1908,15 +1908,21 @@ with st.sidebar:
             file_name=_pdf_name, mime="application/pdf",
             use_container_width=True,
             help="One PDF: Corn (p1), Soybeans (p2), Wheat (p3).")
-        if st.button("💾 Save to FOB 2026 folder", use_container_width=True,
-                     help=f"Writes {_pdf_name} to {FOB_SAVE_DIR}"):
-            try:
-                _path = os.path.join(FOB_SAVE_DIR, _pdf_name)
-                with open(_path, "wb") as _f:
-                    _f.write(_pdf_bytes)
-                st.success(f"Saved to:\n{_path}")
-            except OSError as e:
-                st.error(f"Couldn't save to the FOB folder: {e}")
+        # "Save to folder" only works when the app runs on a machine that can
+        # see the SharePoint-synced folder — hidden on the cloud (Linux) deploy.
+        if os.path.isdir(FOB_SAVE_DIR):
+            if st.button("💾 Save to FOB 2026 folder", use_container_width=True,
+                         help=f"Writes {_pdf_name} to {FOB_SAVE_DIR}"):
+                try:
+                    _path = os.path.join(FOB_SAVE_DIR, _pdf_name)
+                    with open(_path, "wb") as _f:
+                        _f.write(_pdf_bytes)
+                    st.success(f"Saved to:\n{_path}")
+                except OSError as e:
+                    st.error(f"Couldn't save to the FOB folder: {e}")
+        else:
+            st.caption("💡 Run the app locally to enable **Save to FOB folder**; "
+                       "on the cloud, use the download button.")
     except Exception as e:  # never let export break the app
         st.caption(f"PDF export unavailable: {e}")
 
