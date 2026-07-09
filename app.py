@@ -295,14 +295,14 @@ st.markdown(
         border-bottom: 1px solid #e2e8f0;
       }}
       .stTabs [data-baseweb="tab"] {{
-        color: #5b6470;
+        color: #000000;
         font-size: 13px;
         padding: 8px 18px;
         font-weight: 600;
         border-radius: 0;
       }}
       .stTabs [aria-selected="true"] {{
-        color: {JPSI_BLUE} !important;
+        color: #000000 !important;
         font-weight: 700 !important;
         border-bottom: 3px solid {JPSI_BLUE} !important;
       }}
