@@ -7,6 +7,8 @@ Mirrors the JSA FOB Sheet workbook. The core relationship is:
 
 Freight % is entered once (shared across all commodities). CIF and CBOT futures
 are per-commodity. Bushel weight differs by commodity (corn 56, soy/wheat 60).
+
+Module rev: 2 (carry helpers take optional contracts/months for archived dates).
 """
 from __future__ import annotations
 from dataclasses import dataclass
