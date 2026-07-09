@@ -420,6 +420,43 @@ st.markdown(
 )
 
 
+# Read-only / share mode: append ?view=1 to the URL. Exempt from the password.
+VIEW_ONLY = str(st.query_params.get("view", "")).lower() in (
+    "1", "true", "yes", "read", "readonly", "view")
+
+
+def _require_password():
+    """Gate the editable/download app behind a password. The read-only view
+    (?view=1) is exempt. The password comes from EDIT_PASSWORD (Streamlit secrets
+    or an env var); if none is configured the app stays open (e.g. local dev)."""
+    if VIEW_ONLY or st.session_state.get("_authed"):
+        return
+    expected = None
+    try:
+        expected = st.secrets.get("EDIT_PASSWORD")
+    except Exception:
+        pass
+    expected = expected or os.environ.get("EDIT_PASSWORD")
+    if not expected:
+        return                       # no password configured → open
+    _, mid, _ = st.columns([1, 1.5, 1])
+    with mid:
+        st.markdown("#### 🔒 Protected")
+        st.caption("Enter the password to edit and download. Read-only viewers "
+                   "can use the shared **?view=1** link — no password needed.")
+        pw = st.text_input("Password", type="password", key="_pw")
+        if pw:
+            if pw == expected:
+                st.session_state["_authed"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    st.stop()
+
+
+_require_password()
+
+
 # --- session state seed ----------------------------------------------------
 def _by_month(seed_list):
     """A June-window-aligned seed list -> {month_name: value} for name lookup."""
@@ -526,11 +563,6 @@ def _bump_editors():
 # Apply a date parsed from a pasted freight table (must run before the widget).
 if "pending_as_of" in st.session_state:
     st.session_state["as_of_input"] = st.session_state.pop("pending_as_of")
-
-# Read-only / share mode: append ?view=1 to the URL. Hides editing + downloads,
-# lets viewers browse the archived history of Corn/Soybeans/Wheat/Changes/Seasonal.
-VIEW_ONLY = str(st.query_params.get("view", "")).lower() in (
-    "1", "true", "yes", "read", "readonly", "view")
 
 # --- sidebar ---------------------------------------------------------------
 with st.sidebar:
