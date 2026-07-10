@@ -1326,7 +1326,9 @@ def render_seasonal_tab():
         label, val_fmt, val_title, unit = f"Barge Freight {region}", ".0%", "Freight", ""
     else:
         label, val_fmt, val_title, unit = f"FOB {location}", ".2f", "Basis", " Basis"
-    title = f"{CHART_LABEL[commodity]} Seasonal — {delivery} {label}{unit}"
+    # Barge freight is commodity-agnostic, so its title carries no commodity.
+    prefix = "" if metric == "Barge Freight" else f"{CHART_LABEL[commodity]} "
+    title = f"{prefix}Seasonal — {delivery} {label}{unit}"
     legend_title = "Mktg Yr" if delivery == "Nearby" else "Contract"
 
     # 5-year (or fewer) average of completed groups, binned by season week
