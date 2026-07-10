@@ -1172,7 +1172,7 @@ def _month_num(label):
 
 
 @st.cache_data(show_spinner=False)
-def seasonal_frame(commodity, metric, location, delivery, _sig):
+def seasonal_frame(commodity, metric, location, delivery, _sig, region=None):
     """One row per archived date with the chosen value, a group label, and a
     synthetic 'season_date' for overlay plotting.
 
@@ -1203,6 +1203,8 @@ def seasonal_frame(commodity, metric, location, delivery, _sig):
             continue
         if metric == "CIF NOLA":
             val = cmcif.get(col)
+        elif metric == "Freight":
+            val = (frt.get(d, {}).get(region) or {}).get(col)  # tariff multiplier
         else:
             grid = M.compute_fob_grid(commodity, cmcif, frt.get(d, {}), [col])
             val = grid.get(location, {}).get(col)
@@ -1236,15 +1238,21 @@ def render_seasonal_tab():
     with c1:
         commodity = st.selectbox("Commodity", M.COMMODITIES, key="seasonal_commodity")
     with c2:
-        metric = st.radio("Series", ["FOB at location", "CIF NOLA"],
+        metric = st.radio("Series", ["FOB at location", "CIF NOLA", "Barge Freight"],
                           key="seasonal_metric")
     location = "STL"
+    region = "STL"
     with c3:
         if metric == "FOB at location":
             locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
             location = st.selectbox("Location", locs,
                                     index=locs.index("STL") if "STL" in locs else 0,
                                     key="seasonal_location")
+        elif metric == "Barge Freight":
+            regs = list(M.FREIGHT_REGIONS)
+            region = st.selectbox("Freight region", regs,
+                                  index=regs.index("STL") if "STL" in regs else 0,
+                                  key="seasonal_region")
         else:
             st.caption("CIF NOLA export basis — no location.")
     with c4:
@@ -1255,8 +1263,8 @@ def render_seasonal_tab():
 
     dates = db.list_dates()
     sig = (len(dates), dates[0] if dates else "")
-    metric_key = "CIF NOLA" if metric == "CIF NOLA" else "FOB"
-    df = seasonal_frame(commodity, metric_key, location, delivery, sig)
+    metric_key = {"CIF NOLA": "CIF NOLA", "Barge Freight": "Freight"}.get(metric, "FOB")
+    df = seasonal_frame(commodity, metric_key, location, delivery, sig, region)
     if df.empty:
         st.info("No archived data for this selection yet.")
         return
@@ -1265,8 +1273,13 @@ def render_seasonal_tab():
     cur_group = order[-1]
     df = df.assign(Current=df["group"] == cur_group)
     start = SEASON_START[commodity]
-    label = "CIF NOLA" if metric == "CIF NOLA" else f"FOB {location}"
-    title = f"{CHART_LABEL[commodity]} Seasonal — {delivery} {label} Basis"
+    if metric == "CIF NOLA":
+        label, val_fmt, val_title, unit = "CIF NOLA", ".2f", "Basis", " Basis"
+    elif metric == "Barge Freight":
+        label, val_fmt, val_title, unit = f"Barge Freight {region}", ".0%", "Freight", ""
+    else:
+        label, val_fmt, val_title, unit = f"FOB {location}", ".2f", "Basis", " Basis"
+    title = f"{CHART_LABEL[commodity]} Seasonal — {delivery} {label}{unit}"
     legend_title = "Mktg Yr" if delivery == "Nearby" else "Contract"
 
     # 5-year (or fewer) average of completed groups, binned by season week
@@ -1282,7 +1295,7 @@ def render_seasonal_tab():
 
     hover = alt.selection_point(fields=["group"], on="pointerover", nearest=True,
                                 empty=True)
-    yaxis = alt.Axis(format=".2f", labelColor="#1f4e79", labelFontWeight="bold",
+    yaxis = alt.Axis(format=val_fmt, labelColor="#1f4e79", labelFontWeight="bold",
                      labelFontSize=12)
     xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
                      labelFontWeight="bold")
@@ -1295,7 +1308,7 @@ def render_seasonal_tab():
         opacity=alt.condition(hover, alt.value(1.0), alt.value(0.2)),
         tooltip=[alt.Tooltip("group:N", title=legend_title),
                  alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("value:Q", format=".2f", title="Basis")],
+                 alt.Tooltip("value:Q", format=val_fmt, title=val_title)],
     ).add_params(hover)
 
     layers = [year_lines]
@@ -1304,7 +1317,7 @@ def render_seasonal_tab():
             color="#111111", strokeWidth=3, strokeDash=[7, 4]).encode(
             x="season_date:T", y="value:Q",
             tooltip=[alt.Tooltip("lbl:N", title="Series"),
-                     alt.Tooltip("value:Q", format=".2f", title="Avg")])
+                     alt.Tooltip("value:Q", format=val_fmt, title="Avg")])
         layers.append(avg_line)
 
     chart = alt.layer(*layers).properties(
