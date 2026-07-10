@@ -207,11 +207,7 @@ st.markdown(
         color: #333; font-weight: 500;
       }}
       .sheet td.de {{
-        border-left: 2px solid {JPSI_BLUE}; border-right: 2px solid {JPSI_BLUE};
-        font-weight: 700; color: #1f2328; text-align: right;
-      }}
-      .sheet tr.hdr.months td.de-hdr {{
-        border-left: 2px solid {JPSI_BLUE}; border-right: 2px solid {JPSI_BLUE};
+        font-weight: 700; color: #6b7280; text-align: right;
       }}
       .sheet td.up {{
         background-color: #e8f5e9; color: #0d7f3d; font-weight: 700;
