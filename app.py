@@ -207,10 +207,11 @@ st.markdown(
         color: #333; font-weight: 500;
       }}
       .sheet td.de {{
-        border-left: 2px solid {JPSI_BLUE}; font-weight: 700; color: #1f2328;
+        border-left: 2px solid {JPSI_BLUE}; border-right: 2px solid {JPSI_BLUE};
+        font-weight: 700; color: #1f2328; text-align: right;
       }}
       .sheet tr.hdr.months td.de-hdr {{
-        border-left: 2px solid {JPSI_BLUE};
+        border-left: 2px solid {JPSI_BLUE}; border-right: 2px solid {JPSI_BLUE};
       }}
       .sheet td.up {{
         background-color: #e8f5e9; color: #0d7f3d; font-weight: 700;
@@ -822,18 +823,18 @@ def _build_pdf_sheet(commodity, hist=None):
 
     de = getattr(M, "DELIVERY_EQUIV", {}).get(commodity, {})
     if de:
-        months = list(months) + ["Del Equiv"]
+        months = ["Del Equiv"] + list(months)                  # first data column
         out = []
         for kind, label, cells in rows:
             if cells is None:                                   # full-width section
                 out.append((kind, label, cells))
             elif kind == "months":
-                out.append((kind, label, list(cells) + [("Del Equiv", False)]))
+                out.append((kind, label, [("Del Equiv", False)] + list(cells)))
             elif kind == "fob":
                 out.append((kind, label,
-                            list(cells) + [_fnum(de.get(label.replace("FOB Barge ", "")), 2)]))
+                            [_fnum(de.get(label.replace("FOB Barge ", "")), 2)] + list(cells)))
             else:
-                out.append((kind, label, list(cells) + [("", False)]))
+                out.append((kind, label, [("", False)] + list(cells)))
         rows = out
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
@@ -903,18 +904,18 @@ def _build_excel_sheet(commodity, hist=None):
 
     de = getattr(M, "DELIVERY_EQUIV", {}).get(commodity, {})
     if de:
-        months = list(months) + ["Del Equiv"]
+        months = ["Del Equiv"] + list(months)                  # first data column
         out = []
         for kind, label, cells in rows:
             if cells is None:                                   # banner / section
                 out.append((kind, label, cells))
             elif kind == "months":
-                out.append((kind, label, list(cells) + ["Del Equiv"]))
+                out.append((kind, label, ["Del Equiv"] + list(cells)))
             elif kind == "fob":
                 out.append((kind, label,
-                            list(cells) + [_xnum(de.get(label.replace("FOB Barge ", "")))]))
+                            [_xnum(de.get(label.replace("FOB Barge ", "")))] + list(cells)))
             else:
-                out.append((kind, label, list(cells) + [None]))
+                out.append((kind, label, [None] + list(cells)))
         rows = out
 
     return {"commodity": commodity, "months": list(months), "rows": rows}
@@ -951,11 +952,11 @@ def _dir_td(cur, prior, kind):
     return f'<td class="{cls}">{txt}</td>' if cls else f"<td>{txt}</td>"
 
 
-def _data_row(label, vals, fmt, band, lbl_cls="lbl", row_cls="", trail=""):
+def _data_row(label, vals, fmt, band, lbl_cls="lbl", row_cls="", lead=""):
     cells = "".join(f"<td>{fmt(v)}</td>" for v in vals)
     cls = (" band" if band else "") + (f" {row_cls}" if row_cls else "")
     return (f'<tr class="{cls.strip()}"><td class="{lbl_cls}">{label}</td>'
-            f'{cells}{trail}</tr>')
+            f'{lead}{cells}</tr>')
 
 
 def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
@@ -995,10 +996,10 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     rows.append(f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{commodity}</td></tr>')
     # month + contract header rows (contract month is archived per column)
     contracts = contracts or M.CONTRACTS[commodity]
-    rows.append('<tr class="hdr months"><td class="lbl"></td>' +
-                "".join(f"<td>{m}</td>" for m in months) + de_hdr + "</tr>")
-    rows.append('<tr class="hdr"><td class="lbl"></td>' +
-                "".join(f"<td>{c or ''}</td>" for c in contracts) + de_blank + "</tr>")
+    rows.append('<tr class="hdr months"><td class="lbl"></td>' + de_hdr +
+                "".join(f"<td>{m}</td>" for m in months) + "</tr>")
+    rows.append('<tr class="hdr"><td class="lbl"></td>' + de_blank +
+                "".join(f"<td>{c or ''}</td>" for c in contracts) + "</tr>")
     prior = prior or {}
     # CBOT + carry show whenever the data exists — live always, archived only
     # for days saved with futures/spreads (older snapshots stored just CIF/frt).
@@ -1006,10 +1007,10 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     show_carry = bool(spreads) and any(s is not None for s in spreads)
     if show_cbot:
         rows.append(_data_row("CBOT", [fut_row.get(m) for m in months],
-                              lambda v: _num(v, 4), band=True, trail=de_blank))
+                              lambda v: _num(v, 4), band=True, lead=de_blank))
     p_cif = prior.get("cif", {})
     cif_cells = "".join(_dir_td(cif_row.get(m), p_cif.get(m), "cif") for m in months)
-    rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cif_cells}{de_blank}</tr>')
+    rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{de_blank}{cif_cells}</tr>')
 
     grid = M.compute_fob_grid(commodity, cif_row, freight_by_region, months)
     p_grid = prior.get("grid", {})
@@ -1023,7 +1024,7 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
     p_cash = prior.get("cash", {})
     cash_cells = "".join(_dir_td(cash[m], p_cash.get(m), "fob") for m in months)
     rows.append(f'<tr class="strong"><td class="lbl">{cfg["cash_label"]}</td>'
-                f'{cash_cells}{de_blank}</tr>')
+                f'{de_blank}{cash_cells}</tr>')
 
     # Spreads / Carry section (after Cash vs Delivery, before river reaches).
     # Labels + count follow the current contract chain (spreads roll with the
@@ -1038,7 +1039,7 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
             scells.append(_spread_cell(spreads[i]) if i < len(spreads)
                           else "<td></td>")
         rows.append('<tr class="spread"><td class="lbl">Spreads</td>'
-                    + "".join(scells) + de_blank + "</tr>")
+                    + de_blank + "".join(scells) + "</tr>")
 
         # % Full Carry sits under each spread's value column.
         carry = M.pct_full_carry(spreads, fullcarry)
@@ -1048,7 +1049,7 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
             if pos < len(ccells):
                 ccells[pos] = _carry_pct_cell(carry[i])
         rows.append('<tr class="spread"><td class="lbl">% Full Carry</td>'
-                    + "".join(ccells) + de_blank + "</tr>")
+                    + de_blank + "".join(ccells) + "</tr>")
 
     band = True
     for item in M.BLOCK_LAYOUT:
@@ -1063,13 +1064,13 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
             pf = p_frt.get(region, {})
             cells = "".join(_dir_td(fr.get(m), pf.get(m), "pct") for m in months)
             rows.append(f'<tr class="frt-row{" band" if band else ""}">'
-                        f'<td class="lbl">{label}</td>{cells}{de_blank}</tr>')
+                        f'<td class="lbl">{label}</td>{de_blank}{cells}</tr>')
         else:  # fob
             loc = item[1]
             pg = p_grid.get(loc, {})
             cells = "".join(_dir_td(grid[loc][m], pg.get(m), "fob") for m in months)
             rows.append(f'<tr class="{"band" if band else ""}">'
-                        f'<td class="lbl">FOB Barge {loc}</td>{cells}{_de_cell(loc)}</tr>')
+                        f'<td class="lbl">FOB Barge {loc}</td>{_de_cell(loc)}{cells}</tr>')
         band = not band
 
     # Top Carry rows at the bottom (above the chart)
@@ -1079,7 +1080,7 @@ def render_block(commodity, as_of, cif_row, fut_row, freight_by_region,
             tc = M.top_carry(commodity, grid[loc], spreads,
                              contracts=contracts, months=months)
             rows.append(f'<tr><td class="lbl">{label}</td>'
-                        + "".join(_fob_cell(v) for v in tc) + de_blank + "</tr>")
+                        + de_blank + "".join(_fob_cell(v) for v in tc) + "</tr>")
 
     return f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>'
 
