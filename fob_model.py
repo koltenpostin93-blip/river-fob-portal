@@ -133,6 +133,18 @@ REACH_ORDER = [
 
 FACTOR = {loc.name: loc.factor for loc in LOCATIONS}
 
+# Fixed CBOT delivery-equivalent levels per location (a static reference column
+# on the sheet, not derived from CIF/freight and unchanged day to day). Corn and
+# Soybeans carry the Illinois River delivery points; Wheat carries St. Louis
+# only. Values supplied by the desk.
+DELIVERY_EQUIV = {
+    "Corn":     {"Chicago": 6.00, "Seneca": 10.75, "Hennepin": 12.25,
+                 "Peoria": 14.75, "Havana": 16.25},
+    "Soybeans": {"Chicago": 12.00, "Seneca": 16.75, "Hennepin": 18.25,
+                 "Peoria": 20.75, "Havana": 22.25},
+    "Wheat":    {"STL": 28.25},
+}
+
 # Exact vertical row order of a commodity block, mirroring the workbook.
 # Each entry is one of:
 #   ("reach",   reach_heading)                      grey centered header row
