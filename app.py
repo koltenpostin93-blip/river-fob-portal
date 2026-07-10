@@ -210,10 +210,10 @@ st.markdown(
         font-weight: 700; color: #6b7280; text-align: right;
       }}
       .sheet td.up {{
-        background-color: #e8f5e9; color: #0d7f3d; font-weight: 700;
+        background-color: #e8f5e9; color: #1f2328; font-weight: 700;
       }}
       .sheet td.down {{
-        background-color: #ffebee; color: #c00000; font-weight: 700;
+        background-color: #ffebee; color: #1f2328; font-weight: 700;
       }}
       .sheet td.legend {{
         text-align: center; font-size: 0.72rem; color: #555;
