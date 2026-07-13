@@ -657,10 +657,13 @@ with st.sidebar:
         st.divider()
         st.subheader("Archive")
         st.caption(f"CIF + barge freight · {DB_BACKEND}")
+        _arch_dates = db.list_dates()                      # newest first
         view_choice = st.selectbox(
-            "View archived date", ["✏️ Working (live)"] + db.list_dates(),
-            help="Pick a saved date to view its FOB sheet read-only. Choose "
-                 "'Working (live)' to edit on the Inputs tab.")
+            "View archived date", ["✏️ Working (live)"] + _arch_dates,
+            index=1 if _arch_dates else 0,                 # default: latest saved day
+            help="Opens on the most recent saved date (read-only). Choose "
+                 "'✏️ Working (live)' to edit and enter a new day on the "
+                 "Inputs tab.")
         if st.button("↺ Reset inputs to seed"):
             for k in list(st.session_state.keys()):
                 if k.startswith(("freight", "cif_", "carry_", "cashc_", "storage_")):
