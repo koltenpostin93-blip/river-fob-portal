@@ -1995,6 +1995,10 @@ if HIST_DATE:
         HIST_DATE = None
     else:
         view_date = dt.date.fromisoformat(HIST_DATE)
+        # Ground the month window (and the Changes tab's columns) in the selected
+        # date, not today, so an older archived day shows its own months.
+        M.MONTHS = M.months_for(view_date)
+        M.CONTRACTS = {c: M.contracts_for(c, view_date) for c in M.COMMODITIES}
         _extra = " (incl. CBOT + spreads)" if hist_fut else " (CIF + freight only)"
         st.info(f"📅 Viewing archived snapshot for **{view_date:%A, %B %d, %Y}** — "
                 f"read-only · FOB recomputed{_extra}.")
@@ -2105,10 +2109,12 @@ if VIEW_ONLY:
         with tabs[-1]:
             render_seasonal_tab()
 elif HIST_DATE:
-    tabs = st.tabs(M.COMMODITIES + ["📈 Seasonal"])
+    tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES) + ["📈 Seasonal"])
+    with tabs[0]:
+        render_changes_tab(view_date, cur=(hist_cif, hist_frt))
     with tabs[-1]:
         render_seasonal_tab()
-    for tab, commodity in zip(tabs[:len(M.COMMODITIES)], M.COMMODITIES):
+    for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
 else:
