@@ -201,7 +201,12 @@ def parse_tab(ws):
         # 100 is cents, so /100.
         fut = {months[i]: _fut_dollars(ws.cell(cbot_r, c).value)
                for i, c in enumerate(data_cols)}
-        if any(v is not None for v in fut.values()):
+        # Only keep the CBOT row when every value is a plausible grain price
+        # ($/bu). A disconnected Barchart add-in caches junk (e.g. 25/26 for
+        # every month) — skip it so the date archives CIF+freight only rather
+        # than polluting the sheet's CBOT/spreads with garbage.
+        vals = [v for v in fut.values() if v is not None]
+        if vals and all(1.5 <= v <= 20 for v in vals):
             futures[commodity] = fut
 
         for r in range(start, end):

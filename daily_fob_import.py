@@ -26,7 +26,10 @@ import warnings
 warnings.filterwarnings("ignore")
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    # override=True so the project .env is authoritative even if a stray machine
+    # env var DATABASE_URL points somewhere else (this caused pulls to be written
+    # to an old, wrong Supabase project the live app doesn't read).
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 except ImportError:
     pass  # DATABASE_URL may come from the environment instead
 
