@@ -1843,8 +1843,16 @@ def apply_pasted_tables(cif_text, frt_text, fut_text):
             errs.append("Futures: " + err)
         else:
             nf = ns = 0
+            skipped = []
             for commodity, lp in res["futures"].items():
                 if commodity not in M.COMMODITIES:
+                    continue
+                # Reject an implausible futures set — a disconnected Barchart
+                # add-in pastes junk (e.g. 25/26 for every contract). Grain
+                # prices live in ~$1.50–$20/bu; anything outside is not real.
+                pvals = [v for v in lp.values() if v is not None]
+                if pvals and not all(1.5 <= v <= 20 for v in pvals):
+                    skipped.append(commodity)
                     continue
                 active = (st.session_state.get(f"contracts_{commodity}")
                           or list(M.CONTRACTS[commodity]))
@@ -1870,6 +1878,10 @@ def apply_pasted_tables(cif_text, frt_text, fut_text):
                     st.session_state[f"carry_{commodity}"] = pd.DataFrame(
                         {lbl: [v] for lbl, v in vals.items()}, index=["Spread"])
                     ns += len(vals)
+            if skipped:
+                errs.append("Futures looked implausible for " + ", ".join(skipped)
+                            + " (values outside $1.50–$20/bu — is the Barchart "
+                            "add-in connected?) — left the CBOT row unchanged.")
             msgs.append(f"Futures — filled {nf} CBOT values; computed {ns} spreads.")
     if msgs:
         _bump_editors()
