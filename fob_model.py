@@ -253,7 +253,7 @@ def pct_full_carry(spreads, fullcarry):
     """% of full carry per spread = spread / -fullcarry."""
     out = []
     for s, fc in zip(spreads, fullcarry):
-        out.append(None if not fc else s / (-fc))
+        out.append(None if (s is None or not fc) else s / (-fc))
     return out
 
 
