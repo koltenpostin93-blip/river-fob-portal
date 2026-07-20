@@ -1391,6 +1391,100 @@ def render_seasonal_tab():
                f"{len(df)} points / {df['group'].nunique()} contracts.")
 
 
+def _contract_order(ct):
+    """Sort key ordering a contract code within a summer-starting crop window
+    (Jul, Aug, Sep, … then Jan, Feb, Mar of the next year)."""
+    n = M.CONTRACT_MONTH.get(str(ct)[-1].upper())
+    return 99 if n is None else (n if n >= 7 else n + 12)
+
+
+CASHDEL_PALETTE = ["#a52714", "#e8710a", "#2e8bc0", "#1f5fa8",
+                   "#2e7d32", "#7b3fa0", "#b8860b", "#c0392b"]
+
+
+@st.cache_data(show_spinner=False)
+def cashdel_frame(commodity, cash_c, _sig):
+    """One row per (archived date, active delivery contract): the Cash-vs-
+    Delivery basis (¢/bu) at the commodity's cash location, taken at the first
+    window month that uses each distinct contract."""
+    cif, frt, cal = db.fetch_all()
+    loc = M.CARRY_CONFIG[commodity]["cash_loc"]
+    rows = []
+    for d, by_comm in cif.items():
+        cmcif = by_comm.get(commodity)
+        cols = (cal.get(d, {}) or {}).get(commodity)
+        if not cmcif or not cols:
+            continue
+        months = [m for m, _ in cols]
+        grid = M.compute_fob_grid(commodity, cmcif, frt.get(d, {}), months)
+        if loc not in grid:
+            continue
+        cvd = dict(zip(months,
+                       M.cash_vs_delivery(commodity, grid[loc], cash_c, months)))
+        seen = set()
+        for m, ct in cols:
+            if ct in seen:
+                continue
+            seen.add(ct)
+            v = cvd.get(m)
+            if v is not None:
+                rows.append({"date": dt.date.fromisoformat(d), "contract": ct,
+                             "cents": round(float(v) * 100, 1)})
+    return pd.DataFrame(rows)
+
+
+def render_cashdel_tab():
+    st.markdown("### 💵 Cash vs Delivery — by delivery month")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        commodity = st.selectbox("Commodity", M.COMMODITIES, key="cashdel_commodity")
+    with c2:
+        weeks = st.slider("Weeks of history", 6, 52, 12, key="cashdel_weeks")
+    cash_c = float(st.session_state[f"cashc_{commodity}"])
+    loc = M.CARRY_CONFIG[commodity]["cash_loc"]
+    dates = db.list_dates()
+    sig = (len(dates), dates[0] if dates else "", round(cash_c, 4))
+    df = cashdel_frame(commodity, cash_c, sig)
+    if df.empty:
+        st.info("No archived data for this selection yet.")
+        return
+
+    # Weekly sample: keep the most recent date in each ISO week, last `weeks`.
+    df = df.assign(wk=df["date"].map(lambda d: d.isocalendar()[:2]))
+    keep = df.groupby("wk")["date"].max().sort_values().tolist()[-weeks:]
+    df = df[df["date"].isin(keep)].drop(columns="wk")
+
+    order = sorted(df["contract"].unique(), key=_contract_order)
+    color = alt.Color("contract:N", sort=order, title=None,
+                      scale=alt.Scale(domain=order,
+                                      range=CASHDEL_PALETTE[:len(order)]),
+                      legend=alt.Legend(orient="top", labelFontWeight="bold"))
+    base = alt.Chart(df).encode(
+        x=alt.X("date:T", title=None,
+                axis=alt.Axis(format="%-d-%b", labelColor="#333",
+                              labelFontWeight="bold", labelAngle=0,
+                              tickCount=len(keep))),
+        y=alt.Y("cents:Q", title=None,
+                axis=alt.Axis(labelColor="#333", labelFontWeight="bold")),
+        color=color)
+    line = base.mark_line(strokeWidth=2.5,
+                          point=alt.OverlayMarkDef(size=38, filled=True))
+    labels = base.mark_text(dy=-9, fontSize=10, fontWeight="bold").encode(
+        text=alt.Text("cents:Q", format=".0f"))
+    chart = alt.layer(line, labels).properties(
+        height=440, background="transparent",
+        title=alt.TitleParams(f"Cash vs. Delivery: {CHART_LABEL[commodity]} ({loc})",
+                              color="#2e7d32", fontSize=18, fontWeight="bold",
+                              anchor="middle")
+    ).configure_view(strokeWidth=0, fill=None).configure_axis(
+        grid=True, gridColor="#ececec", domainColor="#cccccc"
+    ).configure_legend(labelColor="#333", symbolStrokeWidth=3, labelFontSize=12)
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(f"Cash vs Delivery at **{loc}** for each active delivery contract · "
+               f"¢/bu · weekly (most recent day each week) · cash distance from "
+               f"DVE = {cash_c * 100:.0f}¢ (current value applied across history).")
+
+
 def _chg_cell(cur, prior, kind):
     """Cell showing the current value plus its signed change, colored by direction."""
     if cur is None or pd.isna(cur):
@@ -2111,32 +2205,41 @@ if VIEW_ONLY:
     if not HIST_DATE or hist_cif is None:
         st.info("No archived data available to view yet.")
     else:
-        tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES) + ["📈 Seasonal"])
+        tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
+                       + ["📈 Seasonal", "💵 Cash vs Del"])
         with tabs[0]:
             render_changes_tab(view_date, cur=(hist_cif, hist_frt),
                                allow_download=False)
         for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
             with tab:
                 _render_archived_commodity(commodity)
-        with tabs[-1]:
+        with tabs[-2]:
             render_seasonal_tab()
+        with tabs[-1]:
+            render_cashdel_tab()
 elif HIST_DATE:
-    tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES) + ["📈 Seasonal"])
+    tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
+                   + ["📈 Seasonal", "💵 Cash vs Del"])
     with tabs[0]:
         render_changes_tab(view_date, cur=(hist_cif, hist_frt))
-    with tabs[-1]:
+    with tabs[-2]:
         render_seasonal_tab()
+    with tabs[-1]:
+        render_cashdel_tab()
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
 else:
-    tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES + ["📈 Seasonal"])
+    tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES
+                   + ["📈 Seasonal", "💵 Cash vs Del"])
     with tabs[0]:
         render_changes_tab(as_of)
     with tabs[1]:
         render_inputs_tab(as_of)
-    with tabs[-1]:
+    with tabs[-2]:
         render_seasonal_tab()
+    with tabs[-1]:
+        render_cashdel_tab()
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
