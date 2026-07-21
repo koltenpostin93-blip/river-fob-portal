@@ -1435,23 +1435,38 @@ def cashdel_frame(commodity, cash_c, _sig):
 
 def render_cashdel_tab():
     st.markdown("### 💵 Cash vs Delivery — by delivery month")
-    c1, c2 = st.columns([1, 1])
+    dates = db.list_dates()
+    if not dates:
+        st.info("No archived data yet.")
+        return
+    latest = dt.date.fromisoformat(dates[0])
+    earliest = dt.date.fromisoformat(dates[-1])
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         commodity = st.selectbox("Commodity", M.COMMODITIES, key="cashdel_commodity")
     with c2:
-        weeks = st.slider("Weeks of history", 6, 52, 12, key="cashdel_weeks")
+        weeks = st.slider("Weeks shown", 6, 52, 12, key="cashdel_weeks")
+    with c3:
+        end = st.date_input("Window ends", value=latest, min_value=earliest,
+                            max_value=latest, key="cashdel_end",
+                            help="Slide this back to view prior years — the chart "
+                                 "shows the chosen number of weeks ending here.")
     cash_c = float(st.session_state[f"cashc_{commodity}"])
     loc = M.CARRY_CONFIG[commodity]["cash_loc"]
-    dates = db.list_dates()
-    sig = (len(dates), dates[0] if dates else "", round(cash_c, 4))
+    sig = (len(dates), dates[0], round(cash_c, 4))
     df = cashdel_frame(commodity, cash_c, sig)
     if df.empty:
         st.info("No archived data for this selection yet.")
         return
 
-    # Weekly sample: keep the most recent date in each ISO week, last `weeks`.
+    # Weekly sample (most recent day per ISO week), then keep the last `weeks`
+    # weekly points ending at/before the chosen window-end date.
     df = df.assign(wk=df["date"].map(lambda d: d.isocalendar()[:2]))
-    keep = df.groupby("wk")["date"].max().sort_values().tolist()[-weeks:]
+    weekly = df[df["date"] <= end].groupby("wk")["date"].max().sort_values().tolist()
+    keep = weekly[-weeks:]
+    if not keep:
+        st.info("No data in that window — try an earlier end date.")
+        return
     df = df[df["date"].isin(keep)].drop(columns="wk")
 
     order = sorted(df["contract"].unique(), key=_contract_order)
@@ -1471,18 +1486,20 @@ def render_cashdel_tab():
                           point=alt.OverlayMarkDef(size=38, filled=True))
     labels = base.mark_text(dy=-9, fontSize=10, fontWeight="bold").encode(
         text=alt.Text("cents:Q", format=".0f"))
+    yr = (f"{keep[0]:%Y}" if keep[0].year == keep[-1].year
+          else f"{keep[0]:%Y}–{keep[-1]:%Y}")
     chart = alt.layer(line, labels).properties(
         height=440, background="transparent",
-        title=alt.TitleParams(f"Cash vs. Delivery: {CHART_LABEL[commodity]} ({loc})",
-                              color="#2e7d32", fontSize=18, fontWeight="bold",
-                              anchor="middle")
+        title=alt.TitleParams(
+            f"Cash vs. Delivery: {CHART_LABEL[commodity]} ({loc}) · {yr}",
+            color="#2e7d32", fontSize=18, fontWeight="bold", anchor="middle")
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
         grid=True, gridColor="#ececec", domainColor="#cccccc"
     ).configure_legend(labelColor="#333", symbolStrokeWidth=3, labelFontSize=12)
     st.altair_chart(chart, use_container_width=True)
     st.caption(f"Cash vs Delivery at **{loc}** for each active delivery contract · "
-               f"¢/bu · weekly (most recent day each week) · cash distance from "
-               f"DVE = {cash_c * 100:.0f}¢ (current value applied across history).")
+               f"¢/bu · {keep[0]:%b %d, %Y} – {keep[-1]:%b %d, %Y} · weekly · cash "
+               f"distance from DVE = {cash_c * 100:.0f}¢ (current value across history).")
 
 
 def _chg_cell(cur, prior, kind):
