@@ -319,8 +319,19 @@ def run(commit):
     written = 0
     for d in selected:
         cif, freight, calendar, futures = parsed[d]
-        db.save_snapshot(d.isoformat(), cif, freight, calendar,
-                         futures=futures, spreads=spreads_from(futures, calendar))
+        # Retry each write — a pooled Postgres connection can be dropped mid-run
+        # under a long burst of writes ("server closed the connection").
+        for attempt in range(4):
+            try:
+                db.save_snapshot(
+                    d.isoformat(), cif, freight, calendar,
+                    futures=futures, spreads=spreads_from(futures, calendar))
+                break
+            except Exception as e:
+                if attempt == 3:
+                    raise
+                import time
+                time.sleep(3)
         written += 1
     print(f"\nCommitted {written} snapshots. Archive now spans "
           f"{min(db.list_dates())} -> {max(db.list_dates())} "
