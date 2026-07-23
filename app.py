@@ -14,6 +14,7 @@ import base64
 import datetime as dt
 import os
 import io
+from collections import Counter
 
 import altair as alt
 import pandas as pd
@@ -26,6 +27,7 @@ import db
 import paste_parse
 import fob_pdf
 import fob_excel
+import bids_data
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -40,7 +42,7 @@ except ModuleNotFoundError:
 # Inject any secrets not already set by load_dotenv() into os.environ so db.py
 # reads the shared Supabase via os.getenv() — same pattern as the basis tracker.
 try:
-    for _secret_key in ("DATABASE_URL",):
+    for _secret_key in ("DATABASE_URL", "BASIS_DATABASE_URL"):
         if _secret_key in st.secrets and not os.environ.get(_secret_key):
             os.environ[_secret_key] = st.secrets[_secret_key]
 except Exception:
@@ -1502,6 +1504,127 @@ def render_cashdel_tab():
                f"distance from DVE = {cash_c * 100:.0f}¢ (current value across history).")
 
 
+def _sym_sort(sym):
+    """Order a futures symbol (ZCU26) by delivery: (year, month)."""
+    s = str(sym or "")
+    if len(s) < 5:
+        return (99, 99)
+    try:
+        return (int(s[3:5]), M.CONTRACT_MONTH.get(s[2].upper(), 99))
+    except ValueError:
+        return (99, 99)
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _bids_current(since_iso):
+    return bids_data.current_bids(since_iso)
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _bids_history(grain, since_iso):
+    return bids_data.bid_history(grain, since_iso)
+
+
+def render_riverbids_tab():
+    """Read-only river-terminal bid views (summary / trend / changes).
+
+    Bids live in the basis tracker's database; this is a SELECT-only view so
+    there stays one source of truth. Degrades to a notice if unconfigured.
+    """
+    st.markdown("### 🛥 River Bids — river terminal basis")
+    if not bids_data.configured():
+        st.info("River bids aren't configured for this deployment — add the "
+                "**BASIS_DATABASE_URL** secret to show them here.")
+        return
+
+    today = dt.date.today()
+    c1, c2 = st.columns([1, 1])
+    with c2:
+        days = st.slider("Include bid sheets from the last (days)", 7, 60, 30,
+                         key="rb_days")
+    try:
+        rows = _bids_current((today - dt.timedelta(days=days)).isoformat())
+    except Exception as e:                      # never break the portal
+        st.warning(f"Couldn't load river bids: {e}")
+        return
+    if not rows:
+        st.info("No river-terminal bids in that window.")
+        return
+
+    df = pd.DataFrame(rows)
+    grains = sorted(df["grain"].unique())
+    with c1:
+        grain = st.selectbox("Grain", grains,
+                             index=grains.index("Corn") if "Corn" in grains else 0,
+                             key="rb_grain")
+    d = df[df["grain"] == grain]
+    if d.empty:
+        st.info(f"No river-terminal {grain} bids in that window.")
+        return
+
+    # Group by futures contract — provider delivery-month text is free-form.
+    top = [s for s, _ in Counter(d["futures_symbol"].dropna()).most_common(6)]
+    contracts = sorted(top, key=_sym_sort)
+
+    # ── Summary: current bid sheet, location × contract (¢ basis) ────────────
+    st.markdown("#### Summary — current bids (¢ basis)")
+    piv = (d.pivot_table(index=["provider", "location"], columns="futures_symbol",
+                         values="basis_cents", aggfunc="max")
+             .reindex(columns=contracts))
+    piv.index = [f"{p} · {l}" for p, l in piv.index]
+    st.dataframe(piv, use_container_width=True, height=380)
+    st.caption(f"{piv.shape[0]} river terminals · most recent sheet per location "
+               f"· sheets within {days} days · source: basis tracker (read-only).")
+
+    # ── Trend + changes, from the bid history ───────────────────────────────
+    try:
+        hist = _bids_history(grain, (today - dt.timedelta(days=120)).isoformat())
+    except Exception as e:
+        st.caption(f"Trend unavailable: {e}")
+        return
+    if not hist:
+        return
+    hd = pd.DataFrame(hist)
+    hd["date"] = hd["timestamp"].str[:10]
+    hd = hd[hd["futures_symbol"].isin(contracts)]
+
+    st.markdown("#### Trend — median river basis by contract")
+    trend = (hd.groupby(["date", "futures_symbol"])["basis_cents"]
+               .median().reset_index())
+    chart = alt.Chart(trend).mark_line(
+        strokeWidth=2.5, point=alt.OverlayMarkDef(size=30, filled=True)).encode(
+        x=alt.X("date:T", title=None,
+                axis=alt.Axis(format="%-d-%b", labelColor="#333",
+                              labelFontWeight="bold", labelAngle=0)),
+        y=alt.Y("basis_cents:Q", title=None,
+                axis=alt.Axis(labelColor="#333", labelFontWeight="bold")),
+        color=alt.Color("futures_symbol:N", title=None, sort=contracts,
+                        scale=alt.Scale(domain=contracts,
+                                        range=CASHDEL_PALETTE[:len(contracts)]),
+                        legend=alt.Legend(orient="top", labelFontWeight="bold")),
+    ).properties(
+        height=340, background="transparent",
+        title=alt.TitleParams(f"River Terminal Basis: {grain}", color="#2e7d32",
+                              fontSize=17, fontWeight="bold", anchor="middle"),
+    ).configure_view(strokeWidth=0, fill=None).configure_axis(
+        grid=True, gridColor="#ececec", domainColor="#cccccc"
+    ).configure_legend(labelColor="#333", symbolStrokeWidth=3)
+    st.altair_chart(chart, use_container_width=True)
+
+    # ── Changes: latest quoted date vs the one before it ────────────────────
+    dates = sorted(trend["date"].unique())
+    if len(dates) >= 2:
+        cur_d, prev_d = dates[-1], dates[-2]
+        a = trend[trend["date"] == cur_d].set_index("futures_symbol")["basis_cents"]
+        b = trend[trend["date"] == prev_d].set_index("futures_symbol")["basis_cents"]
+        chg = pd.DataFrame({"Current ¢": a, "Prior ¢": b})
+        chg["Change ¢"] = chg["Current ¢"] - chg["Prior ¢"]
+        st.markdown("#### Changes — vs prior quoted day")
+        st.dataframe(chg.reindex(contracts).dropna(how="all"),
+                     use_container_width=True)
+        st.caption(f"Median across river terminals · {prev_d} → {cur_d}.")
+
+
 def _chg_cell(cur, prior, kind):
     """Cell showing the current value plus its signed change, colored by direction."""
     if cur is None or pd.isna(cur):
@@ -2223,40 +2346,46 @@ if VIEW_ONLY:
         st.info("No archived data available to view yet.")
     else:
         tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
-                       + ["📈 Seasonal", "💵 Cash vs Del"])
+                       + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids"])
         with tabs[0]:
             render_changes_tab(view_date, cur=(hist_cif, hist_frt),
                                allow_download=False)
         for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
             with tab:
                 _render_archived_commodity(commodity)
-        with tabs[-2]:
+        with tabs[-3]:
             render_seasonal_tab()
-        with tabs[-1]:
+        with tabs[-2]:
             render_cashdel_tab()
+        with tabs[-1]:
+            render_riverbids_tab()
 elif HIST_DATE:
     tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
-                   + ["📈 Seasonal", "💵 Cash vs Del"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids"])
     with tabs[0]:
         render_changes_tab(view_date, cur=(hist_cif, hist_frt))
-    with tabs[-2]:
+    with tabs[-3]:
         render_seasonal_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_cashdel_tab()
+    with tabs[-1]:
+        render_riverbids_tab()
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
 else:
     tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES
-                   + ["📈 Seasonal", "💵 Cash vs Del"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids"])
     with tabs[0]:
         render_changes_tab(as_of)
     with tabs[1]:
         render_inputs_tab(as_of)
-    with tabs[-2]:
+    with tabs[-3]:
         render_seasonal_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_cashdel_tab()
+    with tabs[-1]:
+        render_riverbids_tab()
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
