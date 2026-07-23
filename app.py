@@ -28,6 +28,8 @@ import paste_parse
 import fob_pdf
 import fob_excel
 import bids_data
+import river_segments as RS
+import delivery_period as DP
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -1504,15 +1506,27 @@ def render_cashdel_tab():
                f"distance from DVE = {cash_c * 100:.0f}¢ (current value across history).")
 
 
-def _sym_sort(sym):
-    """Order a futures symbol (ZCU26) by delivery: (year, month)."""
-    s = str(sym or "")
-    if len(s) < 5:
-        return (99, 99)
-    try:
-        return (int(s[3:5]), M.CONTRACT_MONTH.get(s[2].upper(), 99))
-    except ValueError:
-        return (99, 99)
+def _dlabel(key):
+    """Sort key (100*year + month) back to a label: 202607 -> 'Jul 2026'."""
+    k = int(key)
+    return DP.label((k // 100, k % 100))
+
+
+def _decorate(frame):
+    """Add canonical delivery month (dkey / deliv) and river segment columns.
+
+    Each provider writes the delivery window differently ("July '26",
+    "Dec '26 River Close"), so delivery_period resolves it to a real month,
+    falling back to the futures contract when the text omits the year.
+    """
+    keys, labels = [], []
+    for dm, fs in zip(frame["delivery_month"], frame["futures_symbol"]):
+        ym = DP.canonical(dm, fs)
+        keys.append(ym[0] * 100 + ym[1] if ym else None)
+        labels.append(DP.label(ym) if ym else "")
+    frame["dkey"] = keys
+    frame["deliv"] = labels
+    frame["segment"] = [RS.river_segment(loc) for loc in frame["location"]]
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -1557,24 +1571,44 @@ def render_riverbids_tab():
         grain = st.selectbox("Grain", grains,
                              index=grains.index("Corn") if "Corn" in grains else 0,
                              key="rb_grain")
-    d = df[df["grain"] == grain]
+    d = df[df["grain"] == grain].copy()
     if d.empty:
         st.info(f"No river-terminal {grain} bids in that window.")
         return
 
-    # Group by futures contract — provider delivery-month text is free-form.
-    top = [s for s, _ in Counter(d["futures_symbol"].dropna()).most_common(6)]
-    contracts = sorted(top, key=_sym_sort)
+    # Providers write the delivery window free-form ("Dec '26 River Close"), so
+    # normalise it to a real month via delivery_period, using the futures symbol
+    # to resolve the year when the text omits it. Group rows by river segment.
+    _decorate(d)
+    cur_key = today.year * 100 + today.month
+    keys = sorted({k for k in d["dkey"].dropna().unique() if k >= cur_key})[:7]
+    if not keys:
+        keys = sorted(d["dkey"].dropna().unique())[-7:]
+    months = [_dlabel(k) for k in keys]
+    d = d[d["dkey"].isin(keys)]
+    segs = [s for s in RS.SEGMENT_ORDER if s in set(d["segment"])]
 
-    # ── Summary: current bid sheet, location × contract (¢ basis) ────────────
-    st.markdown("#### Summary — current bids (¢ basis)")
-    piv = (d.pivot_table(index=["provider", "location"], columns="futures_symbol",
-                         values="basis_cents", aggfunc="max")
-             .reindex(columns=contracts))
-    piv.index = [f"{p} · {l}" for p, l in piv.index]
-    st.dataframe(piv, use_container_width=True, height=380)
-    st.caption(f"{piv.shape[0]} river terminals · most recent sheet per location "
-               f"· sheets within {days} days · source: basis tracker (read-only).")
+    # ── Summary: river segment × delivery month (¢ basis) ───────────────────
+    st.markdown("#### Summary — current bids by river segment (¢ basis)")
+    seg_piv = (d.pivot_table(index="segment", columns="deliv",
+                             values="basis_cents", aggfunc="median")
+                 .reindex(index=segs, columns=months))
+    st.dataframe(seg_piv.round(1), use_container_width=True)
+    st.caption(f"Median basis per segment · {d[['provider','location']].drop_duplicates().shape[0]}"
+               f" river terminals · most recent sheet per location · sheets within "
+               f"{days} days · source: basis tracker (read-only).")
+
+    with st.expander("Detail — by terminal"):
+        loc_piv = (d.pivot_table(index=["segment", "provider", "location"],
+                                 columns="deliv", values="basis_cents",
+                                 aggfunc="max")
+                     .reindex(columns=months))
+        loc_piv = loc_piv.reset_index()
+        loc_piv["segment"] = pd.Categorical(loc_piv["segment"], categories=segs,
+                                            ordered=True)
+        loc_piv = loc_piv.sort_values(["segment", "provider", "location"])
+        st.dataframe(loc_piv, use_container_width=True, height=420,
+                     hide_index=True)
 
     # ── Trend + changes, from the bid history ───────────────────────────────
     try:
@@ -1585,12 +1619,14 @@ def render_riverbids_tab():
     if not hist:
         return
     hd = pd.DataFrame(hist)
+    _decorate(hd)
     hd["date"] = hd["timestamp"].str[:10]
-    hd = hd[hd["futures_symbol"].isin(contracts)]
+    hd = hd[hd["dkey"].isin(keys)]
+    if hd.empty:
+        return
 
-    st.markdown("#### Trend — median river basis by contract")
-    trend = (hd.groupby(["date", "futures_symbol"])["basis_cents"]
-               .median().reset_index())
+    st.markdown("#### Trend — median river basis by delivery month")
+    trend = hd.groupby(["date", "deliv"])["basis_cents"].median().reset_index()
     chart = alt.Chart(trend).mark_line(
         strokeWidth=2.5, point=alt.OverlayMarkDef(size=30, filled=True)).encode(
         x=alt.X("date:T", title=None,
@@ -1598,9 +1634,9 @@ def render_riverbids_tab():
                               labelFontWeight="bold", labelAngle=0)),
         y=alt.Y("basis_cents:Q", title=None,
                 axis=alt.Axis(labelColor="#333", labelFontWeight="bold")),
-        color=alt.Color("futures_symbol:N", title=None, sort=contracts,
-                        scale=alt.Scale(domain=contracts,
-                                        range=CASHDEL_PALETTE[:len(contracts)]),
+        color=alt.Color("deliv:N", title=None, sort=months,
+                        scale=alt.Scale(domain=months,
+                                        range=CASHDEL_PALETTE[:len(months)]),
                         legend=alt.Legend(orient="top", labelFontWeight="bold")),
     ).properties(
         height=340, background="transparent",
@@ -1611,18 +1647,19 @@ def render_riverbids_tab():
     ).configure_legend(labelColor="#333", symbolStrokeWidth=3)
     st.altair_chart(chart, use_container_width=True)
 
-    # ── Changes: latest quoted date vs the one before it ────────────────────
-    dates = sorted(trend["date"].unique())
+    # ── Changes: by segment, latest quoted date vs the one before ───────────
+    sd = hd.groupby(["date", "segment"])["basis_cents"].median().reset_index()
+    dates = sorted(sd["date"].unique())
     if len(dates) >= 2:
         cur_d, prev_d = dates[-1], dates[-2]
-        a = trend[trend["date"] == cur_d].set_index("futures_symbol")["basis_cents"]
-        b = trend[trend["date"] == prev_d].set_index("futures_symbol")["basis_cents"]
+        a = sd[sd["date"] == cur_d].set_index("segment")["basis_cents"]
+        b = sd[sd["date"] == prev_d].set_index("segment")["basis_cents"]
         chg = pd.DataFrame({"Current ¢": a, "Prior ¢": b})
         chg["Change ¢"] = chg["Current ¢"] - chg["Prior ¢"]
-        st.markdown("#### Changes — vs prior quoted day")
-        st.dataframe(chg.reindex(contracts).dropna(how="all"),
+        st.markdown("#### Changes — by segment vs prior quoted day")
+        st.dataframe(chg.reindex(segs).dropna(how="all").round(1),
                      use_container_width=True)
-        st.caption(f"Median across river terminals · {prev_d} → {cur_d}.")
+        st.caption(f"Median basis per segment · {prev_d} → {cur_d}.")
 
 
 def _chg_cell(cur, prior, kind):

@@ -72,10 +72,11 @@ def current_bids(since_iso: str):
 
 def bid_history(grain: str, since_iso: str):
     """Basis history for river terminals for one grain, for the trend chart.
-    -> [{timestamp, provider, location, futures_symbol, basis_cents}]"""
+    -> [{timestamp, provider, location, delivery_month, futures_symbol,
+         basis_cents}]"""
     sql = """
         SELECT s.timestamp, s.provider, s.location,
-               r.futures_symbol, r.basis_cents
+               r.delivery_month, r.futures_symbol, r.basis_cents
         FROM snapshots s
         JOIN snapshot_rows r ON r.snapshot_id = s.id
         JOIN location_meta lm
