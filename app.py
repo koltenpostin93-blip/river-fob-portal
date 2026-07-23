@@ -1658,58 +1658,68 @@ def render_riverbids_tab():
     ).configure_legend(labelColor="#333", symbolStrokeWidth=3)
     st.altair_chart(chart, use_container_width=True)
 
-    # ── Movement for one delivery period: day / week / month ────────────────
+    # ── Movement for one delivery period: segment median + its terminals ────
     st.markdown("#### Movement by segment — single delivery period")
-    sel = st.selectbox("Delivery period", months, key="rb_period")
-    sub = hd[hd["deliv"] == sel]
+    mc1, mc2 = st.columns([1, 2])
+    with mc1:
+        sel = st.selectbox("Delivery period", months, key="rb_period")
+    with mc2:
+        pick = st.multiselect("Segments", segs, default=segs, key="rb_segs",
+                              help="Defaults to every segment; narrow it to "
+                                   "focus on a particular reach.")
+    sub = hd[(hd["deliv"] == sel) & (hd["segment"].isin(pick))]
     if sub.empty:
-        st.info(f"No {sel} history for {grain}.")
-    else:
-        per_day = (sub.groupby(["date", "segment"])["basis_cents"]
-                      .median().reset_index())
-        dts = sorted(per_day["date"].unique())
-        latest = dts[-1]
+        st.info(f"No {sel} history for {grain} in those segments.")
+        return
 
-        def _as_of(target_iso):
-            """Median basis by segment at the last quoted day on/before target."""
-            elig = [x for x in dts if x <= target_iso]
-            if not elig:
-                return None, None
-            day = elig[-1]
-            return day, (per_day[per_day["date"] == day]
-                         .set_index("segment")["basis_cents"])
+    seg_day = sub.groupby(["date", "segment"])["basis_cents"].median().reset_index()
+    loc_day = (sub.groupby(["date", "segment", "provider", "location"])
+                  ["basis_cents"].median().reset_index())
+    dts = sorted(sub["date"].unique())
+    latest = dts[-1]
+    L = dt.date.fromisoformat(latest)
 
-        cur_s = per_day[per_day["date"] == latest].set_index("segment")["basis_cents"]
-        L = dt.date.fromisoformat(latest)
-        out, notes = pd.DataFrame({"Current ¢": cur_s}), []
-        for lbl, back in (("Day", 1), ("Week", 7), ("Month", 30)):
-            day, ser = _as_of((L - dt.timedelta(days=back)).isoformat())
-            if ser is not None:
-                out[f"{lbl} Δ"] = cur_s - ser
-                notes.append(f"{lbl.lower()} vs {day}")
-        st.dataframe(out.reindex(segs).dropna(how="all").round(1),
-                     use_container_width=True)
-        st.caption(f"**{sel}** · median basis per segment as of {latest}"
-                   + (" · " + ", ".join(notes) if notes else "")
-                   + " · Δ in ¢ (positive = basis firmed).")
+    def _baseline(back):
+        """Last quoted day on/before `back` days ago — gaps don't skew it."""
+        elig = [x for x in dts if x <= (L - dt.timedelta(days=back)).isoformat()]
+        return elig[-1] if elig else None
 
-    # ── Which terminals make up each segment ───────────────────────────────
-    st.markdown("#### Locations by segment")
-    pick = st.multiselect("Segments", segs, default=segs, key="rb_segs",
-                          help="Defaults to every segment; narrow it to see "
-                               "which terminals drive a particular reach.")
-    locs = (d[d["segment"].isin(pick)][["segment", "provider", "location", "state"]]
-            .drop_duplicates())
-    if locs.empty:
-        st.info("No terminals for that selection.")
-    else:
-        locs["segment"] = pd.Categorical(locs["segment"], categories=segs,
-                                         ordered=True)
-        locs = locs.sort_values(["segment", "provider", "location"])
-        locs.columns = ["Segment", "Provider", "Location", "State"]
-        st.dataframe(locs, use_container_width=True, hide_index=True, height=360)
-        st.caption(f"{len(locs)} river terminals across "
-                   f"{locs['Segment'].nunique()} segment(s), quoting {grain}.")
+    bases = [(lbl, _baseline(n))
+             for lbl, n in (("Day", 1), ("Week", 7), ("Month", 30))]
+
+    def _movement(frame, keys):
+        cur = frame[frame["date"] == latest].set_index(keys)["basis_cents"]
+        out = pd.DataFrame({"Current ¢": cur})
+        for lbl, b in bases:
+            if b:
+                past = frame[frame["date"] == b].set_index(keys)["basis_cents"]
+                out[f"{lbl} Δ"] = cur - past
+        return out
+
+    seg_mv = _movement(seg_day, ["segment"])
+    loc_mv = _movement(loc_day, ["segment", "provider", "location"])
+    val_cols = list(seg_mv.columns)
+
+    # One table: each segment's median, with the terminals it averages listed
+    # directly beneath it.
+    rows = []
+    for s in [x for x in segs if x in pick]:
+        kids = (loc_mv[loc_mv.index.get_level_values("segment") == s]
+                if len(loc_mv) else loc_mv)
+        if s in seg_mv.index:
+            r = seg_mv.loc[s]
+            rows.append({"Segment": s,
+                         "Terminal": f"▸ {s} — segment median ({len(kids)})",
+                         **{c: r.get(c) for c in val_cols}})
+        for idx, rr in kids.iterrows():
+            rows.append({"Segment": "", "Terminal": f"      {idx[1]} · {idx[2]}",
+                         **{c: rr.get(c) for c in val_cols}})
+    st.dataframe(pd.DataFrame(rows).round(1), use_container_width=True,
+                 hide_index=True, height=560)
+    note = " · ".join(f"{l.lower()} vs {b}" for l, b in bases if b)
+    st.caption(f"**{sel}** · as of {latest}" + (f" · {note}" if note else "")
+               + " · each segment row is the median of the terminals listed "
+                 "beneath it · Δ in ¢ (positive = basis firmed).")
 
 
 def _chg_cell(cur, prior, kind):
