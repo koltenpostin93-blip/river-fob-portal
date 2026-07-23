@@ -1519,8 +1519,12 @@ def _decorate(frame):
     "Dec '26 River Close"), so delivery_period resolves it to a real month,
     falling back to the futures contract when the text omits the year.
     """
+    # Tolerate rows without delivery_month (e.g. a cached result from before the
+    # column was selected) — canonical() then falls back to the futures contract.
+    dm_col = (frame["delivery_month"] if "delivery_month" in frame.columns
+              else [""] * len(frame))
     keys, labels = [], []
-    for dm, fs in zip(frame["delivery_month"], frame["futures_symbol"]):
+    for dm, fs in zip(dm_col, frame["futures_symbol"]):
         ym = DP.canonical(dm, fs)
         keys.append(ym[0] * 100 + ym[1] if ym else None)
         labels.append(DP.label(ym) if ym else "")
@@ -1529,13 +1533,18 @@ def _decorate(frame):
     frame["segment"] = [RS.river_segment(loc) for loc in frame["location"]]
 
 
+# Bump when the bid queries change shape, so a warm cache can't serve rows
+# missing newly-selected columns.
+_BIDS_SCHEMA = 2
+
+
 @st.cache_data(show_spinner=False, ttl=900)
-def _bids_current(since_iso):
+def _bids_current(since_iso, _schema):
     return bids_data.current_bids(since_iso)
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def _bids_history(grain, since_iso):
+def _bids_history(grain, since_iso, _schema):
     return bids_data.bid_history(grain, since_iso)
 
 
@@ -1557,7 +1566,8 @@ def render_riverbids_tab():
         days = st.slider("Include bid sheets from the last (days)", 7, 60, 30,
                          key="rb_days")
     try:
-        rows = _bids_current((today - dt.timedelta(days=days)).isoformat())
+        rows = _bids_current((today - dt.timedelta(days=days)).isoformat(),
+                             _BIDS_SCHEMA)
     except Exception as e:                      # never break the portal
         st.warning(f"Couldn't load river bids: {e}")
         return
@@ -1612,7 +1622,8 @@ def render_riverbids_tab():
 
     # ── Trend + changes, from the bid history ───────────────────────────────
     try:
-        hist = _bids_history(grain, (today - dt.timedelta(days=120)).isoformat())
+        hist = _bids_history(grain, (today - dt.timedelta(days=120)).isoformat(),
+                             _BIDS_SCHEMA)
     except Exception as e:
         st.caption(f"Trend unavailable: {e}")
         return
@@ -1647,19 +1658,58 @@ def render_riverbids_tab():
     ).configure_legend(labelColor="#333", symbolStrokeWidth=3)
     st.altair_chart(chart, use_container_width=True)
 
-    # ── Changes: by segment, latest quoted date vs the one before ───────────
-    sd = hd.groupby(["date", "segment"])["basis_cents"].median().reset_index()
-    dates = sorted(sd["date"].unique())
-    if len(dates) >= 2:
-        cur_d, prev_d = dates[-1], dates[-2]
-        a = sd[sd["date"] == cur_d].set_index("segment")["basis_cents"]
-        b = sd[sd["date"] == prev_d].set_index("segment")["basis_cents"]
-        chg = pd.DataFrame({"Current ¢": a, "Prior ¢": b})
-        chg["Change ¢"] = chg["Current ¢"] - chg["Prior ¢"]
-        st.markdown("#### Changes — by segment vs prior quoted day")
-        st.dataframe(chg.reindex(segs).dropna(how="all").round(1),
+    # ── Movement for one delivery period: day / week / month ────────────────
+    st.markdown("#### Movement by segment — single delivery period")
+    sel = st.selectbox("Delivery period", months, key="rb_period")
+    sub = hd[hd["deliv"] == sel]
+    if sub.empty:
+        st.info(f"No {sel} history for {grain}.")
+    else:
+        per_day = (sub.groupby(["date", "segment"])["basis_cents"]
+                      .median().reset_index())
+        dts = sorted(per_day["date"].unique())
+        latest = dts[-1]
+
+        def _as_of(target_iso):
+            """Median basis by segment at the last quoted day on/before target."""
+            elig = [x for x in dts if x <= target_iso]
+            if not elig:
+                return None, None
+            day = elig[-1]
+            return day, (per_day[per_day["date"] == day]
+                         .set_index("segment")["basis_cents"])
+
+        cur_s = per_day[per_day["date"] == latest].set_index("segment")["basis_cents"]
+        L = dt.date.fromisoformat(latest)
+        out, notes = pd.DataFrame({"Current ¢": cur_s}), []
+        for lbl, back in (("Day", 1), ("Week", 7), ("Month", 30)):
+            day, ser = _as_of((L - dt.timedelta(days=back)).isoformat())
+            if ser is not None:
+                out[f"{lbl} Δ"] = cur_s - ser
+                notes.append(f"{lbl.lower()} vs {day}")
+        st.dataframe(out.reindex(segs).dropna(how="all").round(1),
                      use_container_width=True)
-        st.caption(f"Median basis per segment · {prev_d} → {cur_d}.")
+        st.caption(f"**{sel}** · median basis per segment as of {latest}"
+                   + (" · " + ", ".join(notes) if notes else "")
+                   + " · Δ in ¢ (positive = basis firmed).")
+
+    # ── Which terminals make up each segment ───────────────────────────────
+    st.markdown("#### Locations by segment")
+    pick = st.multiselect("Segments", segs, default=segs, key="rb_segs",
+                          help="Defaults to every segment; narrow it to see "
+                               "which terminals drive a particular reach.")
+    locs = (d[d["segment"].isin(pick)][["segment", "provider", "location", "state"]]
+            .drop_duplicates())
+    if locs.empty:
+        st.info("No terminals for that selection.")
+    else:
+        locs["segment"] = pd.Categorical(locs["segment"], categories=segs,
+                                         ordered=True)
+        locs = locs.sort_values(["segment", "provider", "location"])
+        locs.columns = ["Segment", "Provider", "Location", "State"]
+        st.dataframe(locs, use_container_width=True, hide_index=True, height=360)
+        st.caption(f"{len(locs)} river terminals across "
+                   f"{locs['Segment'].nunique()} segment(s), quoting {grain}.")
 
 
 def _chg_cell(cur, prior, kind):
