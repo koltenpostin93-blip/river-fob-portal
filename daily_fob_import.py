@@ -90,7 +90,24 @@ def main():
         sys.exit(1)
 
     today = dt.date.today()
-    wb_path = sys.argv[1] if len(sys.argv) > 1 else find_active_workbook(today)
+    db.init_db()
+
+    # Stop the 15-min polling loop once today's sheet is in. The task fires every
+    # 15 min (3:15–5:30) only because we don't know WHEN JSA will save the day's
+    # FOB tab. As soon as today's as-of date is archived, an earlier run already
+    # captured the uploaded sheet — so skip the workbook copy + reparse entirely
+    # and let every remaining run be an instant no-op. Pass --force to override
+    # (e.g. to re-pull a corrected sheet). Skipped when an explicit workbook path
+    # is given, since that's an intentional manual re-import.
+    force = "--force" in sys.argv[1:]
+    explicit = [a for a in sys.argv[1:] if a != "--force"]
+    if not explicit and not force:
+        have = {str(x)[:10] for x in db.list_dates()}
+        if today.isoformat() in have:
+            log.info("Today's FOB sheet (%s) already imported — nothing to do.", today)
+            return
+
+    wb_path = explicit[0] if explicit else find_active_workbook(today)
     if not wb_path or not os.path.exists(wb_path):
         log.error("No active FOB workbook found for %s.", today)
         sys.exit(1)
@@ -123,7 +140,6 @@ def main():
             log.warning("No dated tabs found in %s.", b)
             sys.exit(1)
 
-        db.init_db()
         saved = 0
         for d, tab in recent:
             res = IH.parse_tab(wb[tab])
