@@ -9,3 +9,4 @@ openpyxl>=3.1
 psycopg2-binary>=2.9
 
 python-dotenv
+vl-convert-python>=1.0

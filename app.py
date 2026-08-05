@@ -14,6 +14,7 @@ import base64
 import datetime as dt
 import os
 import io
+import re
 from collections import Counter
 
 import altair as alt
@@ -1199,6 +1200,7 @@ def render_carry_chart(commodity, grid, spreads, as_of=None, months=None,
     # Watermark sits behind the chart via CSS (see .vega-embed::before); the
     # chart itself stays clean.
     st.altair_chart(chart, use_container_width=True)
+    _chart_download(chart, title, key=f"carry_png_{commodity}")
     if multi:
         st.caption("Archived curves reuse the current spread structure to anchor "
                    "to spot (spreads aren't stored per date).")
@@ -1384,6 +1386,7 @@ def render_seasonal_tab():
         grid=True, gridColor="#e6e6e6", domainColor="#cccccc"
     ).configure_legend(titleColor="#1f4e79", labelColor="#333", labelFontWeight="bold")
     st.altair_chart(chart, use_container_width=True)
+    _chart_download(chart, title, key="seasonal_png")
     if delivery == "Nearby":
         basis = (f"Nearby (front of curve) · marketing year starts "
                  f"{'September' if start == 9 else 'June'} 1")
@@ -1834,6 +1837,33 @@ def _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt):
     return pd.DataFrame(rows, columns=cols)
 
 
+def _safe_filename(name):
+    """Strip characters Windows/macOS disallow in filenames (e.g. the ':' in a
+    chart title), collapsing them to spaces."""
+    return re.sub(r'[\\/:*?"<>|]+', " ", str(name)).strip() or "chart"
+
+
+def _alt_png(chart, scale=2):
+    """Altair chart -> PNG bytes via vl-convert, or None if it isn't available
+    (so a missing dependency degrades to no button instead of an error)."""
+    try:
+        import vl_convert as vlc
+        return vlc.vegalite_to_png(chart.to_json(), scale=scale)
+    except Exception:
+        return None
+
+
+def _chart_download(chart, title, key):
+    """Show a '📥 PNG' button for an Altair chart (main app only, never in the
+    read-only client view). Filename is the chart title."""
+    if VIEW_ONLY:
+        return
+    png = _alt_png(chart)
+    if png:
+        st.download_button("📥 PNG", data=png, key=key, mime="image/png",
+                           file_name=f"{_safe_filename(title)}.png")
+
+
 def _df_to_png(df, title):
     """Convert DataFrame to PNG using Plotly with JPSI branding."""
     # Alternate row colors for better readability
@@ -1923,8 +1953,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                 "Daily Changes")
             if daily_png:
                 st.download_button(
-                    label="📥 PNG", data=daily_png,
-                    file_name=f"daily_changes_{as_of.isoformat()}.png",
+                    label="📥 Daily PNG", data=daily_png,
+                    file_name=f"Daily CIF Changes {as_of:%m-%d-%y}.png",
                     mime="image/png")
 
     rows = [hdr("Daily Changes")]
@@ -1955,8 +1985,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                 "Weekly Changes")
             if weekly_png:
                 st.download_button(
-                    label="📥 PNG", data=weekly_png,
-                    file_name=f"weekly_changes_{as_of.isoformat()}.png",
+                    label="📥 Weekly PNG", data=weekly_png,
+                    file_name=f"Weekly CIF Changes {as_of:%m-%d-%y}.png",
                     mime="image/png")
 
     rows = [hdr("Weekly Changes")]
