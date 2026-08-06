@@ -12,6 +12,7 @@ History archiving to Postgres is a separate milestone.
 """
 import base64
 import datetime as dt
+import json
 import os
 import io
 import re
@@ -21,6 +22,7 @@ import altair as alt
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import fob_model as M
 import seed_data as S
@@ -2119,17 +2121,59 @@ def _alt_png(chart, scale=2):
         return None
 
 
+def _copy_png_button(png_bytes, key, height=46):
+    """A '📋 Copy' button that puts the PNG on the clipboard (paste into email /
+    Teams). Rendered as a small HTML component because Streamlit has no native
+    clipboard-image action; the button self-reports success/failure inline."""
+    if not png_bytes:
+        return
+    b64 = base64.b64encode(png_bytes).decode()
+    components.html(
+        """
+        <button id="cp" style="font:600 14px system-ui,sans-serif;color:#fff;
+          background:#0693e3;border:none;border-radius:6px;padding:6px 14px;
+          cursor:pointer;width:100%">📋 Copy</button>
+        <script>
+        const b=document.getElementById("cp");
+        b.onclick=async()=>{
+          try{
+            const blob=await (await fetch("data:image/png;base64,__B64__")).blob();
+            await navigator.clipboard.write([new ClipboardItem({"image/png":blob})]);
+            b.textContent="✓ Copied";
+            setTimeout(()=>{b.textContent="📋 Copy";},1500);
+          }catch(e){
+            b.textContent="⚠ "+(e.name||"blocked");
+            setTimeout(()=>{b.textContent="📋 Copy";},2500);
+          }
+        };
+        </script>
+        """.replace("__B64__", b64),
+        height=height)
+
+
+def _png_actions(png, title, key, unavailable_caption=True):
+    """Download + Copy pair for a PNG (main app only). Kept side by side."""
+    if VIEW_ONLY:
+        return
+    if not png:
+        if unavailable_caption:
+            st.caption("⚠ PNG export unavailable in this environment.")
+        return
+    c1, c2, _ = st.columns([1, 1, 4])
+    with c1:
+        st.download_button("📥 PNG", data=png, key=key, mime="image/png",
+                           file_name=f"{_safe_filename(title)}.png",
+                           use_container_width=True)
+    with c2:
+        _copy_png_button(png, key)
+
+
 def _chart_download(chart, title, key):
-    """Show a '📥 PNG' button for an Altair chart (main app only, never in the
+    """Show '📥 PNG' + '📋 Copy' for an Altair chart (main app only, never in the
     read-only client view). Filename is the chart title."""
     if VIEW_ONLY:
         return
-    png = _alt_png(chart)
-    if png:
-        st.download_button("📥 PNG", data=png, key=key, mime="image/png",
-                           file_name=f"{_safe_filename(title)}.png")
-    else:
-        st.caption("⚠ PNG export unavailable in this environment.")
+    _png_actions(_alt_png(chart), title, key)
 
 
 def _df_to_png(df, title):
@@ -2184,6 +2228,52 @@ def _df_to_png(df, title):
         return None
 
 
+@st.cache_data(show_spinner=False)
+def _fob_png_from_spec(spec_json, commodity, title):
+    """Render a FOB-block PNG from the (already display-formatted) sheet spec.
+    Cached on spec_json so kaleido only re-runs when the sheet's numbers change —
+    every tab re-executes each rerun, so uncached this would render on every click."""
+    spec = json.loads(spec_json)
+    months = spec["months"]
+    cols = [commodity] + list(months)
+    data = []
+    for kind, label, cells in spec["rows"]:
+        if kind == "months":                      # these ARE the column headers
+            continue
+        if cells is None:                         # section header row
+            data.append([label] + [""] * len(months))
+            continue
+        texts = []
+        for c in cells:
+            t = c[0] if isinstance(c, (list, tuple)) else c
+            texts.append("" if t is None else str(t))
+        texts = (texts + [""] * len(months))[:len(months)]
+        data.append([label] + texts)
+    return _df_to_png(pd.DataFrame(data, columns=cols), title)
+
+
+def _fob_block_png(commodity, as_of, hist=None):
+    """PNG of a commodity's FOB sheet block, built from the same display spec the
+    PDF uses (freight as %, CIF 2dp, FOB 2dp, % Full Carry, …). `hist` is the
+    5-tuple (cif, freight, calendar, futures, spreads) for an archived date, or
+    None for the live working sheet."""
+    try:
+        spec = _build_pdf_sheet(commodity, hist)
+    except Exception:
+        return None
+    return _fob_png_from_spec(json.dumps(spec, default=str), commodity,
+                              f"{commodity} — River FOB ({as_of:%m/%d/%y})")
+
+
+def _fob_sheet_actions(commodity, as_of, hist=None):
+    """📥 PNG + 📋 Copy for a commodity's FOB sheet block (main app only)."""
+    if VIEW_ONLY:
+        return
+    _png_actions(_fob_block_png(commodity, as_of, hist),
+                 f"{commodity} FOB Sheet {as_of:%m-%d-%y}",
+                 key=f"fobpng_{commodity}")
+
+
 def render_changes_tab(as_of, cur=None, allow_download=True):
     # cur = (cif, freight) to use as the "current" side (an archived snapshot in
     # read-only mode); otherwise the live working inputs.
@@ -2214,18 +2304,10 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
     # --- Daily: CIF + barge freight, vs prior day ---
     st.markdown("#### Daily Changes")
     if allow_download:
-        _c1, _c2 = st.columns([0.9, 0.1])
-        with _c2:
-            daily_png = _df_to_png(
-                _build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt),
-                "Daily Changes")
-            if daily_png:
-                st.download_button(
-                    label="📥 Daily PNG", data=daily_png,
-                    file_name=f"Daily CIF Changes {as_of:%m-%d-%y}.png",
-                    mime="image/png")
-            else:
-                st.caption("⚠ PNG n/a")
+        _png_actions(
+            _df_to_png(_build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt),
+                       "Daily Changes"),
+            f"Daily CIF Changes {as_of:%m-%d-%y}", key="daily_chg_png")
 
     rows = [hdr("Daily Changes")]
     rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
@@ -2248,18 +2330,10 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
     # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
     st.markdown("#### Weekly Changes")
     if allow_download:
-        _c1, _c2 = st.columns([0.9, 0.1])
-        with _c2:
-            weekly_png = _df_to_png(
-                _build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt),
-                "Weekly Changes")
-            if weekly_png:
-                st.download_button(
-                    label="📥 Weekly PNG", data=weekly_png,
-                    file_name=f"Weekly CIF Changes {as_of:%m-%d-%y}.png",
-                    mime="image/png")
-            else:
-                st.caption("⚠ PNG n/a")
+        _png_actions(
+            _df_to_png(_build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt),
+                       "Weekly Changes"),
+            f"Weekly CIF Changes {as_of:%m-%d-%y}", key="weekly_chg_png")
 
     rows = [hdr("Weekly Changes")]
 
@@ -2735,6 +2809,8 @@ def _render_archived_commodity(commodity):
                              spreads, fullcarry, cashc, historical=True,
                              contracts=contracts, months=months, prior=prior),
                 unsafe_allow_html=True)
+    _fob_sheet_actions(commodity, view_date,
+                       hist=(hist_cif, hist_frt, hist_cal, hist_fut, hist_spr))
     st.markdown("##### 📈 Top of Carry")
     render_carry_chart(commodity, grid, spreads, as_of=view_date, months=months,
                        contracts=contracts, cur_label=f"{view_date:%m/%d/%y}")
@@ -2808,6 +2884,7 @@ else:
                                      spreads, fullcarry, cashc, prior=prior,
                                      contracts=st.session_state.get(f"contracts_{commodity}")),
                         unsafe_allow_html=True)
+            _fob_sheet_actions(commodity, as_of)
             st.markdown("##### 📈 Top of Carry")
             render_carry_chart(commodity, M.compute_fob_grid(commodity, cif_row, fbr),
                                spreads, as_of=as_of)
