@@ -1687,6 +1687,119 @@ def _bids_history(grain, since_iso, _schema):
     return bids_data.bid_history(grain, since_iso)
 
 
+def _exp_month_order(m):
+    """Column sort key for the export's wide layout: Spot first, then calendar."""
+    if str(m).strip().lower() == "spot":
+        return -1
+    n = _month_num(m)
+    return n if n is not None else 99
+
+
+@st.cache_data(show_spinner=False)
+def export_frame(metric, commodity, location, region, since, to, _sig):
+    """Tidy history for the export tab -> DataFrame(date, month[, contract], value)
+    for one metric over [since, to]. `since` limits the DB scan; `to` filters."""
+    cif, frt, cal = db.fetch_all(since)
+    rows = []
+    for d in sorted(cif):
+        if to and d > to:
+            continue
+        cmap = dict((cal.get(d, {}) or {}).get(commodity) or []) if commodity else {}
+        if metric == "CIF NOLA":
+            for m, v in ((cif.get(d, {}) or {}).get(commodity) or {}).items():
+                if v is not None:
+                    rows.append({"date": d, "month": m,
+                                 "contract": cmap.get(m, ""), "value": v})
+        elif metric == "Freight":
+            for m, v in ((frt.get(d, {}) or {}).get(region) or {}).items():
+                if v is not None:
+                    rows.append({"date": d, "month": m, "value": v})
+        else:  # FOB at a location
+            ccif = (cif.get(d, {}) or {}).get(commodity) or {}
+            grid = M.compute_fob_grid(commodity, ccif, frt.get(d, {}) or {},
+                                      list(ccif.keys()))
+            for m, v in (grid.get(location) or {}).items():
+                if v is not None:
+                    rows.append({"date": d, "month": m,
+                                 "contract": cmap.get(m, ""), "value": v})
+    return pd.DataFrame(rows)
+
+
+def render_export_tab():
+    """Download archived CIF / freight / FOB history over a date range."""
+    st.markdown("### 📤 Export — historical data")
+    dates = db.list_dates()
+    if not dates:
+        st.info("No archived data yet.")
+        return
+    latest = dt.date.fromisoformat(dates[0])
+    earliest = dt.date.fromisoformat(dates[-1])
+
+    c1, c2, c3 = st.columns(3)
+    metric = c1.selectbox("Data", ["CIF NOLA", "Barge Freight", "FOB (location)"],
+                          key="exp_metric")
+    d_from = c2.date_input("From", value=max(earliest, latest - dt.timedelta(days=730)),
+                           min_value=earliest, max_value=latest, key="exp_from")
+    d_to = c3.date_input("To", value=latest, min_value=earliest, max_value=latest,
+                         key="exp_to")
+
+    metric_key = {"CIF NOLA": "CIF NOLA", "Barge Freight": "Freight",
+                  "FOB (location)": "FOB"}[metric]
+    commodity = location = region = None
+    r1, r2, r3 = st.columns(3)
+    if metric_key == "Freight":
+        region = r1.selectbox("Region", list(M.FREIGHT_REGIONS), key="exp_region")
+    else:
+        commodity = r1.selectbox("Commodity", M.COMMODITIES, key="exp_commodity")
+        if metric_key == "FOB":
+            locs = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
+            location = r2.selectbox("Location", locs,
+                                    index=locs.index("STL") if "STL" in locs else 0,
+                                    key="exp_loc")
+    layout = r3.radio("Layout", ["Wide (dates × months)", "Long (tidy rows)"],
+                      key="exp_layout")
+
+    if d_from > d_to:
+        st.warning("'From' is after 'To' — adjust the dates.")
+        return
+    sig = (len(dates), dates[0], metric_key, commodity, location, region,
+           d_from.isoformat(), d_to.isoformat())
+    df = export_frame(metric_key, commodity, location, region,
+                      d_from.isoformat(), d_to.isoformat(), sig)
+    if df.empty:
+        st.info("No data for that selection and range.")
+        return
+
+    if layout.startswith("Wide"):
+        show = (df.pivot_table(index="date", columns="month", values="value",
+                               aggfunc="first")
+                .reindex(sorted(df["month"].unique(), key=_exp_month_order), axis=1)
+                .reset_index())
+    else:
+        show = df.sort_values(["date", "month"]).reset_index(drop=True)
+
+    st.caption(f"{len(df)} values · {df['date'].nunique()} dates · "
+               f"{df['date'].min()} → {df['date'].max()} · values in "
+               f"{'% of tariff' if metric_key == 'Freight' else '$/bu basis'}.")
+    st.dataframe(show, use_container_width=True, height=380, hide_index=True)
+
+    who = commodity or region
+    base = _safe_filename(f"River {metric_key} {who}"
+                          + (f" {location}" if location else "")
+                          + f" {d_from:%Y-%m-%d} to {d_to:%Y-%m-%d}")
+    dl1, dl2 = st.columns(2)
+    dl1.download_button("📥 CSV", data=show.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{base}.csv", mime="text/csv",
+                        use_container_width=True)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        show.to_excel(xw, index=False, sheet_name="History")
+    dl2.download_button(
+        "📥 Excel", data=buf.getvalue(), file_name=f"{base}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True)
+
+
 def render_riverbids_tab():
     """Read-only river-terminal bid views (summary / trend / changes).
 
@@ -2624,31 +2737,35 @@ if VIEW_ONLY:
             render_riverbids_tab()
 elif HIST_DATE:
     tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
-                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids", "📤 Export"])
     with tabs[0]:
         render_changes_tab(view_date, cur=(hist_cif, hist_frt))
-    with tabs[-3]:
+    with tabs[-4]:
         render_seasonal_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_cashdel_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_riverbids_tab()
+    with tabs[-1]:
+        render_export_tab()
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
 else:
     tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES
-                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids", "📤 Export"])
     with tabs[0]:
         render_changes_tab(as_of)
     with tabs[1]:
         render_inputs_tab(as_of)
-    with tabs[-3]:
+    with tabs[-4]:
         render_seasonal_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_cashdel_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_riverbids_tab()
+    with tabs[-1]:
+        render_export_tab()
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
