@@ -40,6 +40,26 @@ import import_history as IH
 RECENT_TABS = 5                                    # import the last N trading days
 LOG_PATH = os.path.join(os.path.dirname(__file__), "daily_fob_import.log")
 
+# Basis-band sanity: CIF NOLA is stored as a basis ($/bu over CBOT), so a plausible
+# value sits in a tight band. Anything outside almost certainly means a flat price,
+# a cents/dollars slip, or a garbage cell (e.g. a stray 389.95) — not a real day.
+# Bands are set well outside the 20-yr observed min/max per commodity (see the
+# archive: Corn 0.02–2.15, Soybeans -0.34–3.25, Wheat -1.55–1.15 legit).
+CIF_BAND = {"Corn": (-1.0, 3.0), "Soybeans": (-1.5, 4.0), "Wheat": (-2.5, 4.0)}
+_DEFAULT_BAND = (-2.5, 5.0)
+
+
+def _basis_flags(cif):
+    """Return [(commodity, month, value), ...] for CIF values outside the plausible
+    basis band — i.e. suspect entries that shouldn't silently enter the archive."""
+    out = []
+    for c, mv in cif.items():
+        lo, hi = CIF_BAND.get(c, _DEFAULT_BAND)
+        for m, v in mv.items():
+            if v is not None and not (lo <= v <= hi):
+                out.append((c, m, v))
+    return out
+
 # import_history abbreviates months (Jun/Jul); the live archive + the basis
 # tracker's CIF-prefill lookup use the sheet's convention (June/July full, others
 # 3-letter). Remap so a daily import stays key-consistent with existing dates.
@@ -140,8 +160,20 @@ def main():
             log.warning("No dated tabs found in %s.", b)
             sys.exit(1)
 
+        # History-write lock: this pass re-reads the last RECENT_TABS tabs to
+        # backfill any missed days, but it must NOT silently overwrite a date the
+        # archive already holds (that's how a good 8/5 got clobbered by a later,
+        # worse 8/5 tab). New dates write freely; existing dates are left alone
+        # unless --force is passed to intentionally re-pull a corrected sheet.
+        already = {str(x)[:10] for x in db.list_dates()}
+
         saved = 0
         for d, tab in recent:
+            iso = d.isoformat()
+            if iso in already and not force:
+                log.info("  %-6s -> %s  already archived — left as-is "
+                         "(use --force to overwrite).", tab, d)
+                continue
             res = IH.parse_tab(wb[tab])
             if not res:
                 log.warning("  tab %s (%s): parse failed — skipped.", tab, d)
@@ -151,9 +183,19 @@ def main():
             freight = {r: _fix_months(mv) for r, mv in freight.items()}
             calendar = {c: _fix_calendar(cols) for c, cols in calendar.items()}
             futures = {c: _fix_months(mv) for c, mv in futures.items()}
+
+            # Basis-band sanity: block a snapshot whose CIF has implausible values
+            # rather than let garbage (flat prices, decimal slips) into the archive.
+            bad = _basis_flags(cif)
+            if bad and not force:
+                log.warning("  %-6s -> %s  SKIPPED: CIF outside plausible basis "
+                            "band: %s  (use --force to import anyway).", tab, d,
+                            ", ".join(f"{c} {m}={v}" for c, m, v in bad))
+                continue
+
             spreads = IH.spreads_from(futures, calendar)   # from CBOT if present
             n_cif, n_frt = db.save_snapshot(
-                d.isoformat(), cif, freight, calendar,
+                iso, cif, freight, calendar,
                 futures=futures, spreads=spreads)
             months = [mm for mm, _ in calendar.get("Corn", [])]
             log.info("  %-6s -> %s  months=%s  (%d CIF, %d freight, %s CBOT)",
