@@ -1251,7 +1251,8 @@ def _month_num(label):
 
 
 @st.cache_data(show_spinner=False)
-def seasonal_frame(commodity, metric, location, delivery, _sig, region=None):
+def seasonal_frame(commodity, metric, location, delivery, _sig, region=None,
+                   since=None):
     """One row per archived date with the chosen value, a group label, and a
     synthetic 'season_date' for overlay plotting.
 
@@ -1261,7 +1262,7 @@ def seasonal_frame(commodity, metric, location, delivery, _sig, region=None):
       CONTRACT (e.g. "Dec 2025"), with the x-axis anchored to the delivery month
       so each contract's life overlays continuously — Jan extends past year-end.
     """
-    cif, frt, cal = db.fetch_all()
+    cif, frt, cal = db.fetch_all(since)
     start = SEASON_START[commodity]
     D = MONTH_NUM.get(delivery) if delivery != "Nearby" else None
     rows = []
@@ -1340,10 +1341,21 @@ def render_seasonal_tab():
                                 help="Nearby = front of the curve, or pick a "
                                      "specific delivery month (e.g. Dec).")
 
+    # Default to a recent window (covers the 5 lines + 10-yr band) so the chart
+    # doesn't pull the whole ~20-year archive each time. Toggle to load it all
+    # for older analog-year lookback.
+    full_hist = st.checkbox("Load full history (slower)", value=False,
+                            key="seasonal_fullhist",
+                            help="By default the chart loads ~13 recent years — "
+                                 "enough for the 5-year lines and 10-year band. "
+                                 "Enable this to add analog years further back.")
+    since = None if full_hist else (
+        dt.date.today() - dt.timedelta(days=365 * 13 + 4)).isoformat()
+
     dates = db.list_dates()
-    sig = (len(dates), dates[0] if dates else "")
+    sig = (len(dates), dates[0] if dates else "", since or "all")
     metric_key = {"CIF NOLA": "CIF NOLA", "Barge Freight": "Freight"}.get(metric, "FOB")
-    df = seasonal_frame(commodity, metric_key, location, delivery, sig, region)
+    df = seasonal_frame(commodity, metric_key, location, delivery, sig, region, since)
     if df.empty:
         st.info("No archived data for this selection yet.")
         return

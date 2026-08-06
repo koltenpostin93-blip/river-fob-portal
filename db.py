@@ -230,23 +230,28 @@ def load_snapshot(as_of):
         conn.close()
 
 
-def fetch_all():
-    """Bulk-load the whole archive for analytics. -> (cif, freight, calendar)
-    each keyed {as_of: {...}}. Used by the seasonal chart."""
-    conn, _ = _connect()
+def fetch_all(since=None):
+    """Bulk-load the archive for analytics. -> (cif, freight, calendar) each
+    keyed {as_of: {...}}. Used by the seasonal chart. Pass `since` (ISO date) to
+    load only from that date on — as_of is the leading PK column, so it's a fast
+    indexed range scan and avoids pulling the whole ~20-year archive by default."""
+    conn, ph = _connect()
+    where = f" WHERE as_of >= {ph}" if since else ""
+    args = (since,) if since else ()
     try:
         cur = conn.cursor()
         cif = {}
-        cur.execute("SELECT as_of, commodity, month, value FROM cif_history")
+        cur.execute("SELECT as_of, commodity, month, value FROM cif_history" + where, args)
         for d, c, m, v in cur.fetchall():
             cif.setdefault(d, {}).setdefault(c, {})[m] = v
         frt = {}
-        cur.execute("SELECT as_of, region, month, value FROM freight_history")
+        cur.execute("SELECT as_of, region, month, value FROM freight_history" + where, args)
         for d, r, m, v in cur.fetchall():
             frt.setdefault(d, {}).setdefault(r, {})[m] = v
         cal = {}
         cur.execute("SELECT as_of, commodity, seq, month, contract "
-                    "FROM calendar_history ORDER BY as_of, commodity, seq")
+                    "FROM calendar_history" + where
+                    + " ORDER BY as_of, commodity, seq", args)
         for d, c, _s, m, ct in cur.fetchall():
             cal.setdefault(d, {}).setdefault(c, []).append((m, ct))
         return cif, frt, cal
