@@ -1262,7 +1262,16 @@ def seasonal_frame(commodity, metric, location, delivery, _sig, region=None,
       CONTRACT (e.g. "Dec 2025"), with the x-axis anchored to the delivery month
       so each contract's life overlays continuously — Jan extends past year-end.
     """
-    cif, frt, cal = db.fetch_all(since)
+    try:
+        cif, frt, cal = db.fetch_all(since)
+    except TypeError:
+        # Deployed db.py hasn't hot-reloaded the `since` param yet (Streamlit
+        # reloads app.py but not imported modules) — load all and window here.
+        cif, frt, cal = db.fetch_all()
+        if since:
+            cif = {d: v for d, v in cif.items() if d >= since}
+            frt = {d: v for d, v in frt.items() if d >= since}
+            cal = {d: v for d, v in cal.items() if d >= since}
     start = SEASON_START[commodity]
     D = MONTH_NUM.get(delivery) if delivery != "Nearby" else None
     rows = []
