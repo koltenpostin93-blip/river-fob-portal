@@ -1401,7 +1401,7 @@ def render_seasonal_tab():
     if delivery == "Nearby":
         show_fwd = st.checkbox(
             f"Overlay current forward curve (as of {dates[0] if dates else '—'})",
-            value=False, key=f"seasonal_fwd_{commodity}",
+            value=True, key=f"seasonal_fwd_{commodity}",
             help="Plots the latest snapshot's basis for each forward delivery "
                  "month (dashed purple) against the seasonal history — where the "
                  "curve is priced now vs. the historical range.")
@@ -2103,10 +2103,18 @@ def _safe_filename(name):
 
 def _alt_png(chart, scale=2):
     """Altair chart -> PNG bytes via vl-convert, or None if it isn't available
-    (so a missing dependency degrades to no button instead of an error)."""
+    (so a missing dependency degrades to no button instead of an error).
+
+    Serialize with json.dumps(..., default=str) rather than chart.to_json():
+    the seasonal frames carry synthetic datetime.date values (season_date) that
+    to_json() can't serialize ("Object of type date is not JSON serializable"),
+    which silently killed the PNG. default=str renders those as ISO strings that
+    Vega-Lite parses as temporal."""
     try:
+        import json
         import vl_convert as vlc
-        return vlc.vegalite_to_png(chart.to_json(), scale=scale)
+        spec = json.dumps(chart.to_dict(), default=str)
+        return vlc.vegalite_to_png(spec, scale=scale)
     except Exception:
         return None
 
@@ -2120,6 +2128,8 @@ def _chart_download(chart, title, key):
     if png:
         st.download_button("📥 PNG", data=png, key=key, mime="image/png",
                            file_name=f"{_safe_filename(title)}.png")
+    else:
+        st.caption("⚠ PNG export unavailable in this environment.")
 
 
 def _df_to_png(df, title):
@@ -2214,6 +2224,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                     label="📥 Daily PNG", data=daily_png,
                     file_name=f"Daily CIF Changes {as_of:%m-%d-%y}.png",
                     mime="image/png")
+            else:
+                st.caption("⚠ PNG n/a")
 
     rows = [hdr("Daily Changes")]
     rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
@@ -2246,6 +2258,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                     label="📥 Weekly PNG", data=weekly_png,
                     file_name=f"Weekly CIF Changes {as_of:%m-%d-%y}.png",
                     mime="image/png")
+            else:
+                st.caption("⚠ PNG n/a")
 
     rows = [hdr("Weekly Changes")]
 

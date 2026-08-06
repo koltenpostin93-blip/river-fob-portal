@@ -1,8 +1,11 @@
 streamlit>=1.36
 pandas>=2.0
 altair>=5.0
-plotly>=5.0
-kaleido>=0.2.1
+# Changes-table PNGs render via plotly + kaleido. On Streamlit Cloud (headless
+# Linux, no system Chrome) kaleido 1.x fails silently; kaleido 0.2.1 bundles its
+# own chromium and works — but plotly 6 dropped the 0.2 engine, so cap plotly<6.
+plotly>=5.0,<6
+kaleido==0.2.1
 reportlab>=4.0
 openpyxl>=3.1
 # Archive: SQLite is built in (stdlib). For Postgres, set DATABASE_URL and install:
