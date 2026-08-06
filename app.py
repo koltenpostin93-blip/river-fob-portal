@@ -1363,15 +1363,31 @@ def render_seasonal_tab():
     title = f"{prefix}Seasonal — {delivery} {label}{unit}"
     legend_title = "Mktg Yr" if delivery == "Nearby" else "Contract"
 
-    # 5-year (or fewer) average of completed groups, binned by season week
-    completed = order[:-1][-5:]
-    avg = pd.DataFrame()
-    if completed:
-        hist = df[df["group"].isin(completed)].copy()
+    # Individual lines: default to the 5 most recent marketing years, but let the
+    # user add analog years or drop some (newest-first in the picker).
+    recent5 = order[-5:]
+    sel = st.multiselect(
+        "Years shown — add/remove analog years", list(reversed(order)),
+        default=list(reversed(recent5)), key=f"seasonal_years_{commodity}",
+        help="Defaults to the last 5 marketing years; add older analog years to "
+             "compare or remove any you don't want.")
+    sel_years = [g for g in order if g in set(sel)] or recent5
+    df5 = df[df["group"].isin(sel_years)].copy()
+
+    # 10-year range band + average from the last 10 COMPLETED years (exclude the
+    # current partial year), binned by season week.
+    completed10 = order[:-1][-10:]
+    n10 = len(completed10)
+    band = avg = pd.DataFrame()
+    if completed10:
+        hist = df[df["group"].isin(completed10)].copy()
         hist["wk"] = hist["season_date"].map(
             lambda d: d.isocalendar()[0] * 100 + d.isocalendar()[1])
-        avg = (hist.groupby("wk")
-               .agg(value=("value", "mean"), season_date=("season_date", "min"))
+        g = hist.groupby("wk")
+        band = (g.agg(lo=("value", "min"), hi=("value", "max"),
+                      season_date=("season_date", "min"))
+                .reset_index().sort_values("season_date"))
+        avg = (g.agg(value=("value", "mean"), season_date=("season_date", "min"))
                .reset_index().sort_values("season_date"))
 
     hover = alt.selection_point(fields=["group"], on="pointerover", nearest=True,
@@ -1380,21 +1396,33 @@ def render_seasonal_tab():
                      labelFontSize=12)
     xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
                      labelFontWeight="bold")
-    year_lines = alt.Chart(df).mark_line(point=False).encode(
+
+    layers = []
+    if not band.empty:
+        band_area = alt.Chart(band.assign(lbl=f"{n10}-Yr Range")).mark_area(
+            color="#b7c7db", opacity=0.45).encode(
+            x=alt.X("season_date:T", title=None, axis=xaxis),
+            y=alt.Y("lo:Q", title=None, axis=yaxis), y2="hi:Q",
+            tooltip=[alt.Tooltip("lbl:N", title="Band"),
+                     alt.Tooltip("lo:Q", format=val_fmt, title="Min"),
+                     alt.Tooltip("hi:Q", format=val_fmt, title="Max")])
+        layers.append(band_area)
+
+    year_lines = alt.Chart(df5).mark_line(point=False).encode(
         x=alt.X("season_date:T", title=None, axis=xaxis),
         y=alt.Y("value:Q", title=None, axis=yaxis),
-        color=alt.Color("group:N", title=legend_title, sort=order,
+        color=alt.Color("group:N", title=legend_title, sort=sel_years,
                         scale=alt.Scale(scheme="tableau10")),
         size=alt.condition("datum.Current", alt.value(4.5), alt.value(2)),
-        opacity=alt.condition(hover, alt.value(1.0), alt.value(0.2)),
+        opacity=alt.condition(hover, alt.value(1.0), alt.value(0.3)),
         tooltip=[alt.Tooltip("group:N", title=legend_title),
                  alt.Tooltip("date:T", title="Date"),
                  alt.Tooltip("value:Q", format=val_fmt, title=val_title)],
     ).add_params(hover)
+    layers.append(year_lines)
 
-    layers = [year_lines]
     if not avg.empty:
-        avg_line = alt.Chart(avg.assign(lbl=f"{len(completed)}-Yr Avg")).mark_line(
+        avg_line = alt.Chart(avg.assign(lbl=f"{n10}-Yr Avg")).mark_line(
             color="#111111", strokeWidth=3, strokeDash=[7, 4]).encode(
             x="season_date:T", y="value:Q",
             tooltip=[alt.Tooltip("lbl:N", title="Series"),
@@ -1416,9 +1444,9 @@ def render_seasonal_tab():
     else:
         basis = (f"{delivery} delivery contract · followed from when it appears "
                  f"until it expires (Jan runs past year-end)")
-    st.caption(f"{basis} · current ({cur_group}) drawn heavier · black dashed = "
-               f"{len(completed)}-yr avg · hover a line to isolate · "
-               f"{len(df)} points / {df['group'].nunique()} contracts.")
+    st.caption(f"{basis} · {len(sel_years)} year(s) shown, current ({cur_group}) "
+               f"heavier · shaded = {n10}-yr range · black dashed = {n10}-yr avg · "
+               f"hover a line to isolate.")
 
 
 def _contract_order(ct):
