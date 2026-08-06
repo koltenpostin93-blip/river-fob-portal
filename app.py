@@ -1395,6 +1395,47 @@ def render_seasonal_tab():
     sel_years = [g for g in order if g in set(sel)] or recent5
     df5 = df[df["group"].isin(sel_years)].copy()
 
+    # Optional overlay (Nearby only): the current forward curve — the latest
+    # snapshot's basis for each forward delivery month, on the season axis.
+    fwd = pd.DataFrame()
+    if delivery == "Nearby":
+        show_fwd = st.checkbox(
+            f"Overlay current forward curve (as of {dates[0] if dates else '—'})",
+            value=False, key=f"seasonal_fwd_{commodity}",
+            help="Plots the latest snapshot's basis for each forward delivery "
+                 "month (dashed purple) against the seasonal history — where the "
+                 "curve is priced now vs. the historical range.")
+        if show_fwd and dates:
+            lc, lf, lcal = db.load_snapshot(dates[0])
+            cols = (lcal or {}).get(commodity) or []
+            fmonths = [m for m, _ in cols] if cols else list(M.MONTHS)
+            grid = (M.compute_fob_grid(commodity, (lc or {}).get(commodity) or {},
+                                       lf or {}, fmonths)
+                    if metric_key == "FOB" else {})
+            fwd_rows = []
+            for i, m in enumerate(fmonths):
+                mn = _month_num(m)
+                if mn is None:
+                    continue
+                if metric_key == "CIF NOLA":
+                    v = ((lc or {}).get(commodity) or {}).get(m)
+                elif metric_key == "Freight":
+                    v = ((lf or {}).get(region) or {}).get(m)
+                else:
+                    v = grid.get(location, {}).get(m)
+                if v is None:
+                    continue
+                syn = dt.date(2001 if mn >= start else 2002, mn, 15)
+                fwd_rows.append({"season_date": syn, "value": float(v), "mon": m})
+            # Near the marketing-year turn the front month wraps to the far end
+            # of the season axis (e.g. an Aug snapshot: Aug at the right, Sep+ at
+            # the left). Drop those leading wrapped months so the forward curve
+            # reads as a clean left-to-right line over the deferred months.
+            while len(fwd_rows) > 1 and fwd_rows[0]["season_date"] > fwd_rows[1]["season_date"]:
+                fwd_rows.pop(0)
+            fwd = (pd.DataFrame(fwd_rows).sort_values("season_date")
+                   if fwd_rows else pd.DataFrame())
+
     # 10-year range band + average from the last 10 COMPLETED years (exclude the
     # current partial year), binned by season week.
     completed10 = order[:-1][-10:]
@@ -1418,6 +1459,19 @@ def render_seasonal_tab():
     xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
                      labelFontWeight="bold")
 
+    # Colour scale: current marketing year = bold dark green; analog years use
+    # distinct non-green hues so green reads as "current".
+    _palette = ["#c0504d", "#e8871a", "#4472c4", "#7030a0", "#948a54",
+                "#31859c", "#8c564b", "#5b5b5b", "#c00000"]
+    dom, rng, _pi = [], [], 0
+    for grp in sel_years:
+        dom.append(grp)
+        if grp == cur_group:
+            rng.append("#166b34")            # dark green = current year
+        else:
+            rng.append(_palette[_pi % len(_palette)])
+            _pi += 1
+
     layers = []
     if not band.empty:
         band_area = alt.Chart(band.assign(lbl=f"{n10}-Yr Range")).mark_area(
@@ -1433,7 +1487,7 @@ def render_seasonal_tab():
         x=alt.X("season_date:T", title=None, axis=xaxis),
         y=alt.Y("value:Q", title=None, axis=yaxis),
         color=alt.Color("group:N", title=legend_title, sort=sel_years,
-                        scale=alt.Scale(scheme="tableau10")),
+                        scale=alt.Scale(domain=dom, range=rng)),
         size=alt.condition("datum.Current", alt.value(4.5), alt.value(2)),
         opacity=alt.condition(hover, alt.value(1.0), alt.value(0.3)),
         tooltip=[alt.Tooltip("group:N", title=legend_title),
@@ -1449,6 +1503,16 @@ def render_seasonal_tab():
             tooltip=[alt.Tooltip("lbl:N", title="Series"),
                      alt.Tooltip("value:Q", format=val_fmt, title="Avg")])
         layers.append(avg_line)
+
+    if not fwd.empty:
+        fwd_line = alt.Chart(fwd.assign(lbl="Fwd Curve")).mark_line(
+            color="#7b2cbf", strokeWidth=2.5, strokeDash=[4, 3],
+            point=alt.OverlayMarkDef(color="#7b2cbf", size=55, shape="diamond")
+        ).encode(
+            x="season_date:T", y="value:Q", order=alt.Order("season_date:T"),
+            tooltip=[alt.Tooltip("mon:N", title="Fwd month"),
+                     alt.Tooltip("value:Q", format=val_fmt, title="Fwd basis")])
+        layers.append(fwd_line)
 
     chart = alt.layer(*layers).properties(
         height=400, background="transparent",
