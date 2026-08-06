@@ -598,6 +598,29 @@ def _bump_editors():
     st.session_state.editor_ver += 1
 
 
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _archive_filter(dates, key):
+    """Year + Month selectboxes that narrow an ISO-date list (newest first) so a
+    multi-year archive is quick to browse. Returns the filtered list; `key`
+    namespaces the widgets per call site. Month options follow the chosen year."""
+    if not dates:
+        return dates
+    years = sorted({d[:4] for d in dates}, reverse=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        fy = st.selectbox("Year", ["All"] + years, key=f"{key}_year")
+    pool = dates if fy == "All" else [d for d in dates if d[:4] == fy]
+    lbl_to_num = {_MONTH_ABBR[int(m) - 1]: m for m in sorted({d[5:7] for d in pool})}
+    with c2:
+        fm = st.selectbox("Month", ["All"] + list(lbl_to_num), key=f"{key}_month")
+    if fm != "All" and fm in lbl_to_num:
+        pool = [d for d in pool if d[5:7] == lbl_to_num[fm]]
+    return pool
+
+
 # (The As-of date is user-controlled; a pasted freight table no longer moves it.)
 st.session_state.pop("pending_as_of", None)
 
@@ -616,12 +639,13 @@ with st.sidebar:
     )
     if VIEW_ONLY:
         # Read-only: just a date browser over the archived history.
-        _dates = db.list_dates()                       # newest first
+        _all = db.list_dates()                         # newest first
         st.subheader("History")
-        if _dates:
+        if _all:
+            _dates = _archive_filter(_all, "vh")
             view_choice = st.selectbox(
                 "Viewing date", _dates, index=0,
-                help="Browse any archived day. This is a read-only view.")
+                help="Filter by year/month, then pick a day. Read-only view.")
         else:
             view_choice = None
             st.info("No archived dates yet.")
@@ -662,13 +686,12 @@ with st.sidebar:
         st.divider()
         st.subheader("Archive")
         st.caption(f"CIF + barge freight · {DB_BACKEND}")
-        _arch_dates = db.list_dates()                      # newest first
+        _arch_dates = _archive_filter(db.list_dates(), "arch")   # year/month filter
         view_choice = st.selectbox(
             "View archived date", ["✏️ Working (live)"] + _arch_dates,
             index=1 if _arch_dates else 0,                 # default: latest saved day
-            help="Opens on the most recent saved date (read-only). Choose "
-                 "'✏️ Working (live)' to edit and enter a new day on the "
-                 "Inputs tab.")
+            help="Filter by year/month above, then pick a day (opens read-only). "
+                 "Choose '✏️ Working (live)' to edit on the Inputs tab.")
         if st.button("↺ Reset inputs to seed"):
             for k in list(st.session_state.keys()):
                 if k.startswith(("freight", "cif_", "carry_", "cashc_", "storage_")):
