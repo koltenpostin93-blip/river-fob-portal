@@ -54,23 +54,42 @@ FREIGHT_COLS = {
 CIF_COLS = {13: ("Corn", 14), 17: ("Soybeans", 18), 19: ("Wheat", 20)}
 _PREFIX = {"Corn": "C", "Soybeans": "S", "Wheat": "W"}
 
+# Older .xls format (2012-2015): data on 'Sheet1', freight month in col A and
+# CIF month in col K, with the CIF block shifted one left of the .xlsx layout.
+# Columns below are 0-indexed for xlrd.
+FREIGHT_COLS_XLS = {1: ["IL"], 2: ["Ohio"], 4: ["Davenport South", "McGregor South"],
+                    5: ["Upper Miss"], 6: ["STL"], 7: ["Lower Miss"]}
+CIF_COLS_XLS = {11: ("Corn", 12), 15: ("Soybeans", 16), 17: ("Wheat", 18)}
+
 
 def _num(v):
     return v if isinstance(v, (int, float)) else None
 
 
+def _month(label):
+    """Month key from a label, folding split-half rows (FH/LH Feb -> Feb)."""
+    return PP._MONTHS.get(re.sub(r"^(FH|LH)\s+", "", str(label or "").strip().upper()))
+
+
 def index_files():
-    """{date: path} for every MMDDYY.xlsx in the CGB root."""
+    """{date: path} for every MMDDYY.xlsx under the CGB root, including the
+    marketing-year subfolders (06-07 … 17-18) that hold the older files. A root
+    copy wins over a subfolder copy if the same date appears in both."""
+    def _score(path):                        # prefer .xlsx over .xls, root over sub
+        return (path.lower().endswith(".xlsx"), os.path.dirname(path) == CGB_ROOT)
+
     out = {}
-    for f in glob.glob(os.path.join(CGB_ROOT, "*.xlsx")):
-        m = re.fullmatch(r"(\d{2})(\d{2})(\d{2})\.xlsx", os.path.basename(f))
-        if not m:
-            continue
-        try:
-            out[dt.date(2000 + int(m.group(3)), int(m.group(1)),
-                        int(m.group(2)))] = f
-        except ValueError:
-            pass
+    for pat in ("*.xlsx", "*.xls"):
+        for f in glob.glob(os.path.join(CGB_ROOT, "**", pat), recursive=True):
+            m = re.fullmatch(r"(\d{2})(\d{2})(\d{2})\.xlsx?", os.path.basename(f), re.I)
+            if not m:
+                continue
+            try:
+                d = dt.date(2000 + int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                continue
+            if d not in out or _score(f) > _score(out[d]):
+                out[d] = f
     return out
 
 
@@ -89,8 +108,13 @@ def wednesday_files(files, lo, hi):
     return picks
 
 
-def parse_bidsheet(path):
-    """-> (cif, freight, calendar) from a CGB Bid Sheet, or None."""
+def _finish(cif, freight, cal):
+    cif = {c: mv for c, mv in cif.items() if mv}
+    return (cif, freight, {c: v for c, v in cal.items() if v}) if cif else None
+
+
+def _parse_xlsx(path):
+    """Newer .xlsx 'Bid Sheet' layout (2016+). -> (cif, freight, calendar)."""
     tmp = os.path.join(tempfile.gettempdir(), "cgb_" + os.path.basename(path))
     shutil.copy2(path, tmp)
     try:
@@ -102,12 +126,12 @@ def parse_bidsheet(path):
         cal = {c: [] for c in _PREFIX}
         freight = {}
         for r in range(3, 16):               # A3:T15 data rows
-            mon = PP._MONTHS.get(str(ws.cell(r, 1).value or "").strip().upper())
+            mon = _month(ws.cell(r, 1).value)
             if not mon:                      # TW/NW spot rows and blanks
                 continue
             for col, (cm, lc) in CIF_COLS.items():
                 v = _num(ws.cell(r, col).value)
-                if v is not None and v != 0:
+                if v is not None and v != 0 and mon not in cif[cm]:
                     cif[cm][mon] = round(v / 100.0, 4)
                     let = ws.cell(r, lc).value
                     if let:
@@ -116,15 +140,70 @@ def parse_bidsheet(path):
                 v = _num(ws.cell(r, col).value)
                 if v is not None and v != 0:
                     for rg in regs:
-                        freight.setdefault(rg, {})[mon] = v
+                        freight.setdefault(rg, {}).setdefault(mon, round(v, 4))
         wb.close()
-        cif = {c: mv for c, mv in cif.items() if mv}
-        return (cif, freight, {c: v for c, v in cal.items() if v}) if cif else None
+        return _finish(cif, freight, cal)
     finally:
         try:
             os.remove(tmp)
         except OSError:
             pass
+
+
+def _parse_xls(path):
+    """Older .xls 'Sheet1' layout (2012-2015): freight month col A, CIF month
+    col K, CIF block one column left of the .xlsx layout."""
+    import xlrd
+    tmp = os.path.join(tempfile.gettempdir(), "cgbx_" + os.path.basename(path))
+    shutil.copy2(path, tmp)
+    try:
+        wb = xlrd.open_workbook(tmp)
+        if "Sheet1" not in wb.sheet_names():
+            return None
+        sh = wb.sheet_by_name("Sheet1")
+        cif = {c: {} for c in _PREFIX}
+        cal = {c: [] for c in _PREFIX}
+        freight = {}
+        for r in range(2, 15):               # 0-indexed rows 3..15
+            fm = _month(sh.cell_value(r, 0)) if sh.ncols > 0 else None
+            if fm:
+                for col, regs in FREIGHT_COLS_XLS.items():
+                    if col < sh.ncols:
+                        v = _num(sh.cell_value(r, col))
+                        if v is not None and v != 0:
+                            for rg in regs:
+                                freight.setdefault(rg, {}).setdefault(fm, round(v, 4))
+            cm = _month(sh.cell_value(r, 10)) if sh.ncols > 10 else None
+            if cm:
+                for col, (cmd, lc) in CIF_COLS_XLS.items():
+                    if col < sh.ncols:
+                        v = _num(sh.cell_value(r, col))
+                        if v is not None and v != 0 and cm not in cif[cmd]:
+                            cif[cmd][cm] = round(v / 100.0, 4)
+                            let = sh.cell_value(r, lc) if lc < sh.ncols else None
+                            if let:
+                                cal[cmd].append((cm, _PREFIX[cmd] + str(let).strip()))
+        return _finish(cif, freight, cal)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def parse_bidsheet(path):
+    """Dispatch by format. A few .xls-extension files are actually xlsx, so try
+    the extension-appropriate reader first and fall back to the other."""
+    order = ((_parse_xls, _parse_xlsx) if path.lower().endswith(".xls")
+             else (_parse_xlsx, _parse_xls))
+    for fn in order:
+        try:
+            res = fn(path)
+            if res:
+                return res
+        except Exception:
+            continue
+    return None
 
 
 def run(lo, hi, commit):
@@ -163,7 +242,16 @@ def run(lo, hi, commit):
     db.init_db()
     n = 0
     for d, (cif, frt, cal) in parsed.items():
-        db.save_snapshot(d.isoformat(), cif, frt, cal)
+        # Retry — a pooled connection can drop mid-run on a long write burst.
+        for attempt in range(4):
+            try:
+                db.save_snapshot(d.isoformat(), cif, frt, cal)
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                import time
+                time.sleep(3)
         n += 1
     now = db.list_dates()
     print(f"\nCommitted {n} snapshots. Archive now {len(now)} dates, "
