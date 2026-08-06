@@ -1770,6 +1770,15 @@ def render_export_tab():
         st.info("No data for that selection and range.")
         return
 
+    month_opts = sorted(df["month"].unique(), key=_exp_month_order)
+    picked = st.multiselect("Delivery months (leave empty for all)", month_opts,
+                            key="exp_months")
+    if picked:
+        df = df[df["month"].isin(picked)]
+        if df.empty:
+            st.info("No data for those delivery months in this range.")
+            return
+
     if layout.startswith("Wide"):
         show = (df.pivot_table(index="date", columns="month", values="value",
                                aggfunc="first")
