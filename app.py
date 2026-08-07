@@ -2135,10 +2135,17 @@ def _copy_png_button(png_bytes, key, height=46):
           cursor:pointer;width:100%">📋 Copy</button>
         <script>
         const b=document.getElementById("cp");
+        // Build the PNG blob SYNCHRONOUSLY from base64 (no await before the
+        // clipboard write) — an intervening await drops the user-gesture the
+        // Clipboard API requires, which silently fails the copy on a real click.
+        function pngBlob(){
+          const bin=atob("__B64__"), a=new Uint8Array(bin.length);
+          for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i);
+          return new Blob([a],{type:"image/png"});
+        }
         b.onclick=async()=>{
           try{
-            const blob=await (await fetch("data:image/png;base64,__B64__")).blob();
-            await navigator.clipboard.write([new ClipboardItem({"image/png":blob})]);
+            await navigator.clipboard.write([new ClipboardItem({"image/png":pngBlob()})]);
             b.textContent="✓ Copied";
             setTimeout(()=>{b.textContent="📋 Copy";},1500);
           }catch(e){
