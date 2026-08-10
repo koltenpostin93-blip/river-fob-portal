@@ -1567,8 +1567,10 @@ CASHDEL_PALETTE = ["#a52714", "#e8710a", "#2e8bc0", "#1f5fa8",
 @st.cache_data(show_spinner=False)
 def cashdel_frame(commodity, cash_c, _sig):
     """One row per (archived date, active delivery contract): the Cash-vs-
-    Delivery basis (¢/bu) at the commodity's cash location, taken at the first
-    window month that uses each distinct contract."""
+    Delivery basis (¢/bu) at the commodity's cash location, taken at each
+    contract's OWN delivery month (CU→Sep, CZ→Dec, CH→Mar), falling back to the
+    first window month that uses the contract when its delivery month isn't in
+    the window."""
     cif, frt, cal = db.fetch_all()
     loc = M.CARRY_CONFIG[commodity]["cash_loc"]
     rows = []
@@ -1583,12 +1585,21 @@ def cashdel_frame(commodity, cash_c, _sig):
             continue
         cvd = dict(zip(months,
                        M.cash_vs_delivery(commodity, grid[loc], cash_c, months)))
+        # window month label by calendar month number, so a contract can be read
+        # at its delivery month rather than the first column that happens to use it.
+        by_mn = {}
+        for mm, _ct in cols:
+            n = M.label_month_num(mm)
+            if n is not None:
+                by_mn[n] = mm
         seen = set()
         for m, ct in cols:
             if ct in seen:
                 continue
             seen.add(ct)
-            v = cvd.get(m)
+            deliv_mn = M.CONTRACT_MONTH.get(str(ct)[-1].upper())
+            ref_m = by_mn.get(deliv_mn, m)      # contract delivery month, else first-seen
+            v = cvd.get(ref_m)
             if v is not None:
                 rows.append({"date": dt.date.fromisoformat(d), "contract": ct,
                              "cents": round(float(v) * 100, 1)})
