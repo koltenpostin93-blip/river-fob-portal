@@ -1224,8 +1224,9 @@ def render_carry_chart(commodity, grid, spreads, as_of=None, months=None,
                        labelFontWeight="bold")
     # Watermark sits behind the chart via CSS (see .vega-embed::before); the
     # chart itself stays clean.
+    _snap_anchor(f"snap_carry_{commodity}")
     st.altair_chart(chart, use_container_width=True)
-    _chart_download(chart, title, key=f"carry_png_{commodity}")
+    _snap_toolbar(f"snap_carry_{commodity}", title)
     if multi:
         st.caption("Archived curves reuse the current spread structure to anchor "
                    "to spot (spreads aren't stored per date).")
@@ -1523,8 +1524,9 @@ def render_seasonal_tab():
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
         grid=True, gridColor="#e6e6e6", domainColor="#cccccc"
     ).configure_legend(titleColor="#1f4e79", labelColor="#333", labelFontWeight="bold")
+    _snap_anchor("snap_seasonal")
     st.altair_chart(chart, use_container_width=True)
-    _chart_download(chart, title, key="seasonal_png")
+    _snap_toolbar("snap_seasonal", title)
     if delivery == "Nearby":
         basis = (f"Nearby (front of curve) · marketing year starts "
                  f"{'September' if start == 9 else 'June'} 1")
@@ -2158,6 +2160,88 @@ def _copy_png_button(png_bytes, key, height=46):
         height=height)
 
 
+_SNAP_JS = """
+<div style="display:flex;gap:6px;align-items:center">
+  <button id="dl" style="font:600 13px system-ui,sans-serif;color:#fff;
+    background:#0693e3;border:none;border-radius:6px;padding:6px 12px;
+    cursor:pointer">\U0001F4E5 PNG</button>
+  <button id="cp" style="font:600 13px system-ui,sans-serif;color:#0693e3;
+    background:#fff;border:1.5px solid #0693e3;border-radius:6px;padding:6px 12px;
+    cursor:pointer">\U0001F4CB Copy</button>
+  <span id="msg" style="font:12px system-ui,sans-serif;color:#888"></span>
+</div>
+<script>
+const P=window.parent, PD=P.document, TARGET="__ID__", FN="__FN__";
+function ensureH2C(){
+  if(P.html2canvas) return Promise.resolve();
+  if(P.__h2c) return P.__h2c;
+  P.__h2c=new Promise((res,rej)=>{
+    const s=PD.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+    s.onload=()=>res(); s.onerror=()=>rej(new Error("load failed"));
+    PD.head.appendChild(s); setTimeout(()=>rej(new Error("timeout")),10000);
+  });
+  return P.__h2c;
+}
+// Resolve the element to shoot: the tagged wrapper itself if it holds content
+// (tables), else the first chart that appears AFTER the anchor in document order
+// (a chart can't carry an id; document-order avoids grabbing a table above it).
+function target(){
+  const el=PD.getElementById(TARGET); if(!el) return null;
+  if(el.querySelector("table,canvas,svg")) return el;
+  const charts=[...PD.querySelectorAll('[data-testid$="VegaLiteChart"],[data-testid="stVegaLiteChart"]')];
+  for(const c of charts){
+    if(el.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) return c;
+  }
+  return charts[0]||el;
+}
+async function shoot(){
+  await ensureH2C();
+  const el=target(); if(!el) throw new Error("nothing to capture");
+  return await P.html2canvas(el,{scale:2,backgroundColor:"#ffffff",logging:false,useCORS:true});
+}
+const msg=t=>{const m=document.getElementById("msg"); m.textContent=t;
+  if(t) setTimeout(()=>{m.textContent="";},2500);};
+document.getElementById("dl").onclick=async()=>{
+  msg("…"); try{ const c=await shoot(); const a=document.createElement("a");
+    a.download=FN+".png"; a.href=c.toDataURL("image/png"); a.click(); msg("✓ saved"); }
+  catch(e){ msg("⚠ "+e.message); }
+};
+// Promise-based ClipboardItem so the async html2canvas work keeps the click's
+// user-gesture (a plain await before clipboard.write would drop it).
+document.getElementById("cp").onclick=async()=>{
+  msg("…");
+  try{
+    await navigator.clipboard.write([new ClipboardItem({"image/png":(async()=>{
+      const c=await shoot();
+      return await new Promise(r=>c.toBlob(r,"image/png"));
+    })()})]);
+    msg("✓ copied");
+  }catch(e){ msg("⚠ "+(e.name||e.message)); }
+};
+</script>
+"""
+
+
+def _snap_anchor(snap_id):
+    """Zero-height marker so a following chart can be found by the snapshot tool
+    (st.altair_chart can't carry an id of its own)."""
+    st.markdown(f'<div id="{snap_id}" style="height:0"></div>',
+                unsafe_allow_html=True)
+
+
+def _snap_toolbar(snap_id, filename, height=44):
+    """📥 PNG + 📋 Copy that screenshot the actual on-screen element (styled sheet
+    or rendered chart) client-side via html2canvas — a true snapshot, not a
+    server-rebuilt image. Main app only. `snap_id` is a wrapper div's id (tables)
+    or a _snap_anchor placed just before a chart."""
+    if VIEW_ONLY:
+        return
+    components.html(
+        _SNAP_JS.replace("__ID__", snap_id).replace("__FN__", _safe_filename(filename)),
+        height=height)
+
+
 def _png_actions(png, title, key, unavailable_caption=True):
     """Download + Copy pair for a PNG (main app only). Kept side by side."""
     if VIEW_ONLY:
@@ -2311,10 +2395,7 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
     # --- Daily: CIF + barge freight, vs prior day ---
     st.markdown("#### Daily Changes")
     if allow_download:
-        _png_actions(
-            _df_to_png(_build_daily_changes_df(cur_cif, cur_frt, d_cif, d_frt),
-                       "Daily Changes"),
-            f"Daily CIF Changes {as_of:%m-%d-%y}", key="daily_chg_png")
+        _snap_toolbar("snap_daily_chg", f"Daily CIF Changes {as_of:%m-%d-%y}")
 
     rows = [hdr("Daily Changes")]
     rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
@@ -2329,7 +2410,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                                   (d_frt.get(r) or {}).get(m), "pct")
                         for m in M.MONTHS)
         rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
-    st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
+    st.markdown(f'<div id="snap_daily_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
                 unsafe_allow_html=True)
     st.caption(f"Day-over-day: {cur_lbl} values vs prior archived date "
                f"({pdaily or 'none'}).")
@@ -2337,10 +2419,7 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
     # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
     st.markdown("#### Weekly Changes")
     if allow_download:
-        _png_actions(
-            _df_to_png(_build_weekly_changes_df(cur_cif, cur_frt, w_cif, w_frt),
-                       "Weekly Changes"),
-            f"Weekly CIF Changes {as_of:%m-%d-%y}", key="weekly_chg_png")
+        _snap_toolbar("snap_weekly_chg", f"Weekly CIF Changes {as_of:%m-%d-%y}")
 
     rows = [hdr("Weekly Changes")]
 
@@ -2369,7 +2448,8 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
                         for m in M.MONTHS)
         rows.append(f'<tr class="strong"><td class="lbl">FOB</td>{cells}</tr>')
 
-    st.markdown(f'<div class="sheet-wrap"><table class="sheet">{"".join(rows)}</table></div>',
+    st.markdown(f'<div id="snap_weekly_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
                 unsafe_allow_html=True)
     st.caption(f"Week-over-week: {cur_lbl} values vs ~7 days ago "
                f"({pweek or 'none'}).")
@@ -2812,12 +2892,13 @@ def _render_archived_commodity(commodity):
         contracts=contracts, months=months) if fut_row else [])
     prior = load_prior(commodity, HIST_DATE, cashc)
     grid = M.compute_fob_grid(commodity, cif_row, fbr, months)
-    st.markdown(render_block(commodity, view_date, cif_row, fut_row, fbr,
-                             spreads, fullcarry, cashc, historical=True,
-                             contracts=contracts, months=months, prior=prior),
-                unsafe_allow_html=True)
-    _fob_sheet_actions(commodity, view_date,
-                       hist=(hist_cif, hist_frt, hist_cal, hist_fut, hist_spr))
+    st.markdown(f'<div id="snap_fob_{commodity}">'
+                + render_block(commodity, view_date, cif_row, fut_row, fbr,
+                               spreads, fullcarry, cashc, historical=True,
+                               contracts=contracts, months=months, prior=prior)
+                + '</div>', unsafe_allow_html=True)
+    _snap_toolbar(f"snap_fob_{commodity}",
+                  f"{commodity} FOB Sheet {view_date:%m-%d-%y}")
     st.markdown("##### 📈 Top of Carry")
     render_carry_chart(commodity, grid, spreads, as_of=view_date, months=months,
                        contracts=contracts, cur_label=f"{view_date:%m/%d/%y}")
@@ -2887,11 +2968,13 @@ else:
             )
             cashc = st.session_state[f"cashc_{commodity}"]
             prior = load_prior(commodity, as_of.isoformat(), cashc)
-            st.markdown(render_block(commodity, as_of, cif_row, fut_row, fbr,
-                                     spreads, fullcarry, cashc, prior=prior,
-                                     contracts=st.session_state.get(f"contracts_{commodity}")),
-                        unsafe_allow_html=True)
-            _fob_sheet_actions(commodity, as_of)
+            st.markdown(f'<div id="snap_fob_{commodity}">'
+                        + render_block(commodity, as_of, cif_row, fut_row, fbr,
+                                       spreads, fullcarry, cashc, prior=prior,
+                                       contracts=st.session_state.get(f"contracts_{commodity}"))
+                        + '</div>', unsafe_allow_html=True)
+            _snap_toolbar(f"snap_fob_{commodity}",
+                          f"{commodity} FOB Sheet {as_of:%m-%d-%y}")
             st.markdown("##### 📈 Top of Carry")
             render_carry_chart(commodity, M.compute_fob_grid(commodity, cif_row, fbr),
                                spreads, as_of=as_of)
