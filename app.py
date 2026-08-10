@@ -1455,8 +1455,6 @@ def render_seasonal_tab():
         avg = (g.agg(value=("value", "mean"), season_date=("season_date", "min"))
                .reset_index().sort_values("season_date"))
 
-    hover = alt.selection_point(fields=["group"], on="pointerover", nearest=True,
-                                empty=True)
     yaxis = alt.Axis(format=val_fmt, labelColor="#1f4e79", labelFontWeight="bold",
                      labelFontSize=12)
     xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
@@ -1486,18 +1484,34 @@ def render_seasonal_tab():
                      alt.Tooltip("hi:Q", format=val_fmt, title="Max")])
         layers.append(band_area)
 
-    year_lines = alt.Chart(df5).mark_line(point=False).encode(
-        x=alt.X("season_date:T", title=None, axis=xaxis),
-        y=alt.Y("value:Q", title=None, axis=yaxis),
-        color=alt.Color("group:N", title=legend_title, sort=sel_years,
-                        scale=alt.Scale(domain=dom, range=rng)),
-        size=alt.condition("datum.Current", alt.value(4.5), alt.value(2)),
-        opacity=alt.condition(hover, alt.value(1.0), alt.value(0.3)),
-        tooltip=[alt.Tooltip("group:N", title=legend_title),
-                 alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("value:Q", format=val_fmt, title=val_title)],
-    ).add_params(hover)
-    layers.append(year_lines)
+    # Emphasis: keep the current + last marketing year bold and opaque; fade the
+    # other analog years to faint background context (the average and forward
+    # curve are their own bold layers). Two layers so the faint set can't muddy
+    # the prominent ones.
+    last_group = order[-2] if len(order) >= 2 else None
+    prom_set = {g for g in (cur_group, last_group) if g is not None}
+    color_enc = alt.Color(
+        "group:N", sort=sel_years, scale=alt.Scale(domain=dom, range=rng),
+        legend=alt.Legend(title=legend_title, symbolOpacity=1,
+                          symbolStrokeWidth=3))
+    line_tt = [alt.Tooltip("group:N", title=legend_title),
+               alt.Tooltip("date:T", title="Date"),
+               alt.Tooltip("value:Q", format=val_fmt, title=val_title)]
+    df_faint = df5[~df5["group"].isin(prom_set)]
+    if not df_faint.empty:
+        layers.append(alt.Chart(df_faint).mark_line(
+            point=False, strokeWidth=1.3, opacity=0.16).encode(
+            x=alt.X("season_date:T", title=None, axis=xaxis),
+            y=alt.Y("value:Q", title=None, axis=yaxis),
+            color=color_enc, tooltip=line_tt))
+    df_prom = df5[df5["group"].isin(prom_set)]
+    if not df_prom.empty:
+        layers.append(alt.Chart(df_prom).mark_line(point=False, opacity=0.95).encode(
+            x=alt.X("season_date:T", title=None, axis=xaxis),
+            y=alt.Y("value:Q", title=None, axis=yaxis),
+            color=color_enc,
+            size=alt.condition("datum.Current", alt.value(4.5), alt.value(3)),
+            tooltip=line_tt))
 
     if not avg.empty:
         avg_line = alt.Chart(avg.assign(lbl=f"{n10}-Yr Avg")).mark_line(
@@ -1509,8 +1523,8 @@ def render_seasonal_tab():
 
     if not fwd.empty:
         fwd_line = alt.Chart(fwd.assign(lbl="Fwd Curve")).mark_line(
-            color="#7b2cbf", strokeWidth=2.5, strokeDash=[4, 3],
-            point=alt.OverlayMarkDef(color="#7b2cbf", size=55, shape="diamond")
+            color="#7b2cbf", strokeWidth=4.5, strokeDash=[5, 3],
+            point=alt.OverlayMarkDef(color="#7b2cbf", size=95, shape="diamond")
         ).encode(
             x="season_date:T", y="value:Q", order=alt.Order("season_date:T"),
             tooltip=[alt.Tooltip("mon:N", title="Fwd month"),
@@ -1533,9 +1547,10 @@ def render_seasonal_tab():
     else:
         basis = (f"{delivery} delivery contract · followed from when it appears "
                  f"until it expires (Jan runs past year-end)")
-    st.caption(f"{basis} · {len(sel_years)} year(s) shown, current ({cur_group}) "
-               f"heavier · shaded = {n10}-yr range · black dashed = {n10}-yr avg · "
-               f"hover a line to isolate.")
+    st.caption(f"{basis} · current ({cur_group}) and last ({last_group}) year "
+               f"bold, other {max(0, len(sel_years) - 2)} year(s) faded for context · "
+               f"shaded = {n10}-yr range · black dashed = {n10}-yr avg · "
+               f"purple dashed = forward curve.")
 
 
 def _contract_order(ct):
