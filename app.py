@@ -1669,7 +1669,9 @@ def render_cashdel_tab():
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
         grid=True, gridColor="#ececec", domainColor="#cccccc"
     ).configure_legend(labelColor="#333", symbolStrokeWidth=3, labelFontSize=12)
+    _snap_anchor("snap_cashdel")
     st.altair_chart(chart, use_container_width=True)
+    _snap_toolbar("snap_cashdel", f"Cash vs Delivery {commodity} {loc} {yr}")
     st.caption(f"Cash vs Delivery at **{loc}** for each active delivery contract · "
                f"¢/bu · {keep[0]:%b %d, %Y} – {keep[-1]:%b %d, %Y} · weekly · cash "
                f"distance from DVE = {cash_c * 100:.0f}¢ (current value across history).")
