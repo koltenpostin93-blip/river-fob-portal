@@ -13,3 +13,5 @@ psycopg2-binary>=2.9
 
 python-dotenv
 vl-convert-python>=1.0
+# Fastmarkets Physical Prices API client (FOB Vessel tab)
+requests>=2.28

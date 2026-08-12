@@ -33,6 +33,7 @@ import fob_excel
 import bids_data
 import river_segments as RS
 import delivery_period as DP
+import fob_vessel
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -47,7 +48,8 @@ except ModuleNotFoundError:
 # Inject any secrets not already set by load_dotenv() into os.environ so db.py
 # reads the shared Supabase via os.getenv() — same pattern as the basis tracker.
 try:
-    for _secret_key in ("DATABASE_URL", "BASIS_DATABASE_URL"):
+    for _secret_key in ("DATABASE_URL", "BASIS_DATABASE_URL",
+                        "FOB_VESSEL_SERVICE_NAME", "FOB_VESSEL_API_KEY"):
         if _secret_key in st.secrets and not os.environ.get(_secret_key):
             os.environ[_secret_key] = st.secrets[_secret_key]
 except Exception:
@@ -1677,6 +1679,195 @@ def render_cashdel_tab():
                f"distance from DVE = {cash_c * 100:.0f}¢ (current value across history).")
 
 
+_VESSEL_SBY_KEY = {s["key"]: s for s in fob_vessel.SERIES}
+_VESSEL_PALETTE = ["#1f5fa8", "#e8710a", "#2e7d32", "#7b3fa0", "#a52714",
+                   "#2e8bc0", "#b8860b", "#c0392b"]
+
+
+@st.cache_data(show_spinner=False)
+def fob_vessel_frame(_sig):
+    """Tidy FOB vessel history -> DataFrame(date, commodity, origin, grade, disp,
+    metric, value, skey). `disp` = origin plus grade (e.g. 'US Gulf HRW')."""
+    try:
+        raw = fob_vessel.load_all()
+    except Exception:
+        return pd.DataFrame()
+    rows = []
+    for sym, series in raw.items():
+        meta = fob_vessel.SYMBOL_META.get(sym)
+        if not meta:
+            continue
+        s, metric = meta
+        disp = s["origin"] + (f" {s['label']}" if s["label"] else "")
+        for d, v in series.items():
+            rows.append({"date": d, "commodity": s["commodity"],
+                         "origin": s["origin"], "grade": s["label"], "disp": disp,
+                         "metric": metric, "value": v, "skey": s["key"]})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def render_fob_vessel_tab():
+    st.markdown("### 🚢 FOB Vessel — export FOB by origin")
+    st.caption("Fastmarkets export FOB assessments · corn / soybeans / wheat at "
+               "US Gulf, PNW, Brazil, Argentina, Ukraine.")
+    # Display reads the archive (DB), so it works on Cloud without the Fastmarkets
+    # creds — those are only needed by the daily pull (fob_vessel_import.py).
+    try:
+        dates = fob_vessel.list_dates()
+    except Exception:
+        dates = []
+    if not dates:
+        st.info("No FOB Vessel data archived yet — run `python fob_vessel_import.py` "
+                "(needs the Fastmarkets FOB_VESSEL_* creds).")
+        return
+    df = fob_vessel_frame((len(dates), dates[0]))
+    if df.empty:
+        st.info("No FOB Vessel data yet.")
+        return
+
+    c_order = {c: i for i, c in enumerate(fob_vessel.COMMODITIES)}
+    o_order = {o: i for i, o in enumerate(fob_vessel.ORIGINS)}
+
+    # ── Snapshot: latest $/mt + FOB basis per series, with day-over-day change ──
+    st.markdown("#### Latest")
+    latest = {}
+    for (skey, metric), g in df.groupby(["skey", "metric"]):
+        g = g.sort_values("date")
+        last = g.iloc[-1]
+        prev = g.iloc[-2] if len(g) > 1 else None
+        chg = (last["value"] - prev["value"]) if prev is not None else None
+        latest.setdefault(skey, {})[metric] = (last["value"], chg, last["date"])
+    snap = []
+    for skey, s in _VESSEL_SBY_KEY.items():
+        d = latest.get(skey, {})
+        flat = d.get("flat", (None, None, None))
+        basis = d.get("basis", (None, None, None))
+        asof = flat[2] or basis[2]
+        snap.append({
+            "Commodity": s["commodity"], "Origin": s["origin"],
+            "Grade": s["label"], "$/mt": flat[0],
+            "Δ $/mt": flat[1], "Basis ¢/bu": basis[0], "Δ basis": basis[1],
+            "As of": asof.strftime("%Y-%m-%d") if asof is not None else "—",
+            "_c": c_order.get(s["commodity"], 9), "_o": o_order.get(s["origin"], 9)})
+    snap = (pd.DataFrame(snap).sort_values(["_c", "_o", "Grade"])
+            .drop(columns=["_c", "_o"]))
+    st.dataframe(snap, use_container_width=True, hide_index=True, column_config={
+        "$/mt": st.column_config.NumberColumn(format="%.2f"),
+        "Δ $/mt": st.column_config.NumberColumn(format="%+.2f"),
+        "Basis ¢/bu": st.column_config.NumberColumn(format="%.0f"),
+        "Δ basis": st.column_config.NumberColumn(format="%+.0f")})
+
+    metric = st.radio("Metric", ["$/mt", "FOB basis (¢/bu)"], horizontal=True,
+                      key="vessel_metric")
+    mkey = "flat" if metric == "$/mt" else "basis"
+    mfmt = ".2f" if mkey == "flat" else ".0f"
+    dm = df[df["metric"] == mkey]
+
+    # ── Trend: one line per origin for a chosen commodity ──
+    st.markdown("#### Trend")
+    t1, t2 = st.columns([1, 1])
+    with t1:
+        commodity = st.selectbox("Commodity", fob_vessel.COMMODITIES,
+                                 key="vessel_ts_commodity")
+    wins = {"6M": 183, "1Y": 365, "2Y": 730, "5Y": 1825, "Max": 99999}
+    with t2:
+        win = st.selectbox("Window", list(wins), index=1, key="vessel_ts_window")
+    since = df["date"].max() - pd.Timedelta(days=wins[win])
+    ts = dm[(dm["commodity"] == commodity) & (dm["date"] >= since)]
+    if ts.empty:
+        st.info("No data for that commodity / metric.")
+    else:
+        dom = sorted(ts["disp"].unique(),
+                     key=lambda d: (o_order.get(d.split()[0] if not d.startswith("US")
+                                                else " ".join(d.split()[:2]), 9), d))
+        chart = alt.Chart(ts).mark_line(
+            strokeWidth=2.5, point=alt.OverlayMarkDef(size=22, filled=True)).encode(
+            x=alt.X("date:T", title=None, axis=alt.Axis(
+                format="%b %y", labelColor="#333", labelFontWeight="bold")),
+            y=alt.Y("value:Q", title=None, axis=alt.Axis(
+                labelColor="#333", labelFontWeight="bold")),
+            color=alt.Color("disp:N", title=None, sort=dom,
+                            scale=alt.Scale(domain=dom,
+                                            range=_VESSEL_PALETTE[:len(dom)]),
+                            legend=alt.Legend(orient="top", labelFontWeight="bold")),
+            tooltip=[alt.Tooltip("disp:N", title="Origin"),
+                     alt.Tooltip("date:T", title="Date"),
+                     alt.Tooltip("value:Q", format=mfmt, title=metric)]
+        ).properties(
+            height=400, background="transparent",
+            title=alt.TitleParams(f"{commodity} FOB {metric} — by origin",
+                                  color="#2e7d32", fontSize=17, fontWeight="bold",
+                                  anchor="middle")
+        ).configure_view(strokeWidth=0, fill=None).configure_axis(
+            grid=True, gridColor="#ececec", domainColor="#cccccc"
+        ).configure_legend(labelColor="#333", symbolStrokeWidth=3, labelFontSize=12)
+        _snap_anchor("snap_vessel_ts")
+        st.altair_chart(chart, use_container_width=True)
+        _snap_toolbar("snap_vessel_ts", f"FOB Vessel {commodity} {metric}")
+
+    # ── Spreads: each origin minus a reference, in $/mt (basis refs differ) ──
+    st.markdown("#### Origin spreads ($/mt)")
+    flat = df[df["metric"] == "flat"]
+    s1, s2, s3 = st.columns([1, 1, 1])
+    with s1:
+        scommodity = st.selectbox("Commodity ", fob_vessel.COMMODITIES,
+                                  key="vessel_sp_commodity")
+    fc = flat[flat["commodity"] == scommodity]
+    disp_avail = sorted(fc["disp"].unique(),
+                        key=lambda d: o_order.get(d.split()[0], 9))
+    if len(disp_avail) < 2:
+        st.info("Need at least two origins to show a spread.")
+        return
+    with s2:
+        ref = st.selectbox("Reference", disp_avail,
+                           index=next((i for i, d in enumerate(disp_avail)
+                                       if d.startswith("US Gulf")), 0),
+                           key="vessel_sp_ref")
+    with s3:
+        swin = st.selectbox("Window ", list(wins), index=1, key="vessel_sp_window")
+    ssince = df["date"].max() - pd.Timedelta(days=wins[swin])
+    piv = fc[fc["date"] >= ssince].pivot_table(index="date", columns="disp",
+                                               values="value", aggfunc="first")
+    if ref not in piv.columns:
+        st.info("No data for that reference.")
+        return
+    spread = piv.sub(piv[ref], axis=0).drop(columns=[ref]).reset_index()
+    sp = spread.melt(id_vars="date", var_name="disp", value_name="value").dropna()
+    if sp.empty:
+        st.info("No overlapping data for a spread.")
+        return
+    sdom = sorted(sp["disp"].unique(), key=lambda d: o_order.get(d.split()[0], 9))
+    schart = alt.Chart(sp).mark_line(strokeWidth=2.5).encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(
+            format="%b %y", labelColor="#333", labelFontWeight="bold")),
+        y=alt.Y("value:Q", title=None, axis=alt.Axis(
+            labelColor="#333", labelFontWeight="bold")),
+        color=alt.Color("disp:N", title=None, sort=sdom,
+                        scale=alt.Scale(domain=sdom,
+                                        range=_VESSEL_PALETTE[:len(sdom)]),
+                        legend=alt.Legend(orient="top", labelFontWeight="bold")),
+        tooltip=[alt.Tooltip("disp:N", title="vs " + ref),
+                 alt.Tooltip("date:T", title="Date"),
+                 alt.Tooltip("value:Q", format=".2f", title="Spread $/mt")]
+    ).properties(
+        height=360, background="transparent",
+        title=alt.TitleParams(f"{scommodity} FOB spread vs {ref} ($/mt)",
+                              color="#2e7d32", fontSize=16, fontWeight="bold",
+                              anchor="middle")
+    ).configure_view(strokeWidth=0, fill=None).configure_axis(
+        grid=True, gridColor="#ececec", domainColor="#cccccc"
+    ).configure_legend(labelColor="#333", symbolStrokeWidth=3, labelFontSize=12)
+    _snap_anchor("snap_vessel_spread")
+    st.altair_chart(schart, use_container_width=True)
+    _snap_toolbar("snap_vessel_spread", f"FOB Vessel spread {scommodity} vs {ref}")
+    st.caption("Positive = origin trades over the reference; negative = under it. "
+               "Spreads use $/mt so origins with different futures bases stay "
+               "comparable.")
+
+
 def _dlabel(key):
     """Sort key (100*year + month) back to a label: 202607 -> 'Jul 2026'."""
     k = int(key)
@@ -2952,15 +3143,18 @@ if VIEW_ONLY:
             render_riverbids_tab()
 elif HIST_DATE:
     tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
-                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids", "📤 Export"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
+                      "🚢 FOB Vessel", "📤 Export"])
     with tabs[0]:
         render_changes_tab(view_date, cur=(hist_cif, hist_frt))
-    with tabs[-4]:
+    with tabs[-5]:
         render_seasonal_tab()
-    with tabs[-3]:
+    with tabs[-4]:
         render_cashdel_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_riverbids_tab()
+    with tabs[-2]:
+        render_fob_vessel_tab()
     with tabs[-1]:
         render_export_tab()
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
@@ -2968,17 +3162,20 @@ elif HIST_DATE:
             _render_archived_commodity(commodity)
 else:
     tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES
-                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids", "📤 Export"])
+                   + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
+                      "🚢 FOB Vessel", "📤 Export"])
     with tabs[0]:
         render_changes_tab(as_of)
     with tabs[1]:
         render_inputs_tab(as_of)
-    with tabs[-4]:
+    with tabs[-5]:
         render_seasonal_tab()
-    with tabs[-3]:
+    with tabs[-4]:
         render_cashdel_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_riverbids_tab()
+    with tabs[-2]:
+        render_fob_vessel_tab()
     with tabs[-1]:
         render_export_tab()
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
