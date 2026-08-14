@@ -45,11 +45,14 @@ def main():
         print(f"backfill {lo} -> {hi}: fetched {len(rows)}, saved {V.save(rows)}")
         return
 
-    rows = V.fetch_latest()
+    # Refresh a trailing window rather than just the latest snapshot, so a late
+    # or revised assessment (Fastmarkets publishes across the day) still lands.
+    today = dt.date.today()
+    lo = (today - dt.timedelta(days=7)).isoformat()
+    rows = V.fetch_history(lo, today.isoformat())
     n = V.save(rows)
     latest = max((r[0] for r in rows), default="—")
-    print(f"{dt.date.today()}: saved {n} FOB vessel prices (latest assessment "
-          f"date {latest}).")
+    print(f"{today}: refreshed {n} rows over {lo}..{today} (latest {latest}).")
 
 
 if __name__ == "__main__":
