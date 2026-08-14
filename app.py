@@ -1819,7 +1819,7 @@ def _render_fob_vessel_tab():
         "Basis ¢/bu": st.column_config.NumberColumn(format="%.0f"),
         "Δ basis": st.column_config.NumberColumn(format="%+.0f")})
 
-    metric = st.radio("Metric", ["$/mt", "Basis (¢/bu)"], horizontal=True,
+    metric = st.radio("Metric", ["$/mt", "Basis (¢/bu)"], index=1, horizontal=True,
                       key="vessel_metric",
                       help="Basis = Fastmarkets premium in ¢/bu over CME (FOB & "
                            "CFR only; freight is $/mt).")
