@@ -1221,6 +1221,8 @@ def render_carry_chart(commodity, grid, spreads, as_of=None, months=None,
 
     chart = chart.properties(
         height=360, background="transparent",
+        padding={"left": 6, "right": 40, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(title, color="#c00000", fontSize=17,
                               fontWeight="bold", anchor="middle"),
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
@@ -1538,6 +1540,8 @@ def render_seasonal_tab():
 
     chart = alt.layer(*layers).properties(
         height=400, background="transparent",
+        padding={"left": 6, "right": 40, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(title, color="#c00000", fontSize=17,
                               fontWeight="bold", anchor="middle"),
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
@@ -1668,6 +1672,8 @@ def render_cashdel_tab():
           else f"{keep[0]:%Y}–{keep[-1]:%Y}")
     chart = alt.layer(line, labels).properties(
         height=440, background="transparent",
+        padding={"left": 6, "right": 40, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(
             f"Cash vs. Delivery: {CHART_LABEL[commodity]} ({loc}) · {yr}",
             color="#2e7d32", fontSize=18, fontWeight="bold", anchor="middle")
@@ -1722,25 +1728,35 @@ def fob_vessel_frame(_sig):
 
 
 def _vessel_line_chart(data, title, unit, o_order, key):
-    """Shared line-per-origin chart + snapshot toolbar for the vessel tab."""
+    """Shared line-per-origin chart + snapshot toolbar for the vessel tab.
+    Labels the latest point of each line just to its right, and reserves right
+    padding (+ fit autosize) so those labels and the axes never clip."""
     dom = sorted(data["disp"].unique(),
                  key=lambda d: (o_order.get(_vessel_origin_of(d), 9), d))
     fmt = ".2f" if unit == "$/mt" else ".0f"
-    chart = alt.Chart(data).mark_line(
+    color = alt.Color("disp:N", title=None, sort=dom,
+                      scale=alt.Scale(domain=dom, range=_VESSEL_PALETTE[:len(dom)]),
+                      legend=alt.Legend(orient="top", labelFontWeight="bold"))
+    x = alt.X("date:T", title=None, axis=alt.Axis(
+        format="%b %y", labelColor="#333", labelFontWeight="bold"))
+    y = alt.Y("value:Q", title=None, scale=alt.Scale(zero=False, nice=True),
+              axis=alt.Axis(labelColor="#333", labelFontWeight="bold"))
+    line = alt.Chart(data).mark_line(
         strokeWidth=2.5, point=alt.OverlayMarkDef(size=22, filled=True)).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(
-            format="%b %y", labelColor="#333", labelFontWeight="bold")),
-        y=alt.Y("value:Q", title=None, scale=alt.Scale(zero=False, nice=True),
-                axis=alt.Axis(labelColor="#333", labelFontWeight="bold")),
-        color=alt.Color("disp:N", title=None, sort=dom,
-                        scale=alt.Scale(domain=dom,
-                                        range=_VESSEL_PALETTE[:len(dom)]),
-                        legend=alt.Legend(orient="top", labelFontWeight="bold")),
+        x=x, y=y, color=color,
         tooltip=[alt.Tooltip("disp:N", title="Origin"),
                  alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("value:Q", format=fmt, title=unit)]
-    ).properties(
+                 alt.Tooltip("value:Q", format=fmt, title=unit)])
+    last = data.sort_values("date").groupby("disp", as_index=False).tail(1)
+    end = alt.Chart(last).mark_text(
+        align="left", dx=7, fontWeight="bold", fontSize=11).encode(
+        x=x, y=y, text=alt.Text("value:Q", format=fmt),
+        color=alt.Color("disp:N", sort=dom, legend=None,
+                        scale=alt.Scale(domain=dom, range=_VESSEL_PALETTE[:len(dom)])))
+    chart = alt.layer(line, end).properties(
         height=400, background="transparent",
+        padding={"left": 6, "right": 62, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(title, color="#2e7d32", fontSize=16,
                               fontWeight="bold", anchor="middle")
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
@@ -1880,20 +1896,28 @@ def _render_fob_vessel_tab():
         return
     sdom = sorted(sp["disp"].unique(),
                   key=lambda d: o_order.get(_vessel_origin_of(d), 9))
-    schart = alt.Chart(sp).mark_line(strokeWidth=2.5).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(
-            format="%b %y", labelColor="#333", labelFontWeight="bold")),
-        y=alt.Y("value:Q", title=None, scale=alt.Scale(zero=False, nice=True),
-                axis=alt.Axis(labelColor="#333", labelFontWeight="bold")),
-        color=alt.Color("disp:N", title=None, sort=sdom,
-                        scale=alt.Scale(domain=sdom,
-                                        range=_VESSEL_PALETTE[:len(sdom)]),
-                        legend=alt.Legend(orient="top", labelFontWeight="bold")),
+    scolor = alt.Color("disp:N", title=None, sort=sdom,
+                       scale=alt.Scale(domain=sdom, range=_VESSEL_PALETTE[:len(sdom)]),
+                       legend=alt.Legend(orient="top", labelFontWeight="bold"))
+    sx = alt.X("date:T", title=None, axis=alt.Axis(
+        format="%b %y", labelColor="#333", labelFontWeight="bold"))
+    sy = alt.Y("value:Q", title=None, scale=alt.Scale(zero=False, nice=True),
+               axis=alt.Axis(labelColor="#333", labelFontWeight="bold"))
+    sline = alt.Chart(sp).mark_line(strokeWidth=2.5).encode(
+        x=sx, y=sy, color=scolor,
         tooltip=[alt.Tooltip("disp:N", title="vs " + ref),
                  alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("value:Q", format=".2f", title="Spread $/mt")]
-    ).properties(
+                 alt.Tooltip("value:Q", format=".2f", title="Spread $/mt")])
+    slast = sp.sort_values("date").groupby("disp", as_index=False).tail(1)
+    send = alt.Chart(slast).mark_text(
+        align="left", dx=7, fontWeight="bold", fontSize=11).encode(
+        x=sx, y=sy, text=alt.Text("value:Q", format=".2f"),
+        color=alt.Color("disp:N", sort=sdom, legend=None,
+                        scale=alt.Scale(domain=sdom, range=_VESSEL_PALETTE[:len(sdom)])))
+    schart = alt.layer(sline, send).properties(
         height=360, background="transparent",
+        padding={"left": 6, "right": 62, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(f"{svlabel} spread vs {ref} ($/mt)",
                               color="#2e7d32", fontSize=16, fontWeight="bold",
                               anchor="middle")
@@ -2173,6 +2197,8 @@ def render_riverbids_tab():
                         legend=alt.Legend(orient="top", labelFontWeight="bold")),
     ).properties(
         height=340, background="transparent",
+        padding={"left": 6, "right": 40, "top": 6, "bottom": 6},
+        autosize=alt.AutoSizeParams(type="fit", contains="padding"),
         title=alt.TitleParams(f"River Terminal Basis: {grain}", color="#2e7d32",
                               fontSize=17, fontWeight="bold", anchor="middle"),
     ).configure_view(strokeWidth=0, fill=None).configure_axis(
