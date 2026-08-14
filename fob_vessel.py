@@ -18,30 +18,62 @@ ORIGINS = ["US Gulf", "US PNW", "Brazil", "Argentina", "Ukraine"]
 COMMODITIES = ["Corn", "Soybeans", "Wheat"]
 
 
-def _s(commodity, origin, label, flat, basis):
-    key = f"{commodity}|{origin}" + (f"|{label}" if label else "")
-    return {"commodity": commodity, "origin": origin, "label": label,
-            "flat": flat, "basis": basis, "key": key}
+def _s(group, commodity, origin, label, flat, basis):
+    key = f"{group}|{commodity}|{origin}" + (f"|{label}" if label else "")
+    return {"group": group, "commodity": commodity, "origin": origin,
+            "label": label, "flat": flat, "basis": basis, "key": key}
 
 
-# The tracked series (confirmed with the user): flat $/mt symbol + basis c$/bu
-# symbol (or None where Fastmarkets has no premium quote).
+# The tracked series: flat $/mt symbol + basis c$/bu symbol (or None where
+# Fastmarkets has no premium quote). `group` separates FOB export prices, CFR
+# China delivered soybeans, and ocean freight routes.
 SERIES = [
-    _s("Corn", "US Gulf",   "",     "AG-CRN-0075", "AG-CRN-0076"),
-    _s("Corn", "US PNW",    "",     "AG-CRN-0077", "AG-CRN-0078"),
-    _s("Corn", "Brazil",    "",     "AG-CRN-0071", "AG-CRN-0072"),
-    _s("Corn", "Argentina", "",     "AG-CRN-0069", "AG-CRN-0070"),
-    _s("Corn", "Ukraine",   "HIPP", "AG-CRN-0062", "AG-CRN-0063"),
-    _s("Soybeans", "US Gulf",   "",       "AG-SYB-0020", "AG-SYB-0021"),
-    _s("Soybeans", "US PNW",    "",       "AG-SYB-0022", "AG-SYB-0023"),
-    _s("Soybeans", "Brazil",    "Santos", "AG-SYB-0014", "AG-SYB-0015"),
-    _s("Soybeans", "Argentina", "",       "AG-SYB-0016", "AG-SYB-0017"),
-    _s("Wheat", "US Gulf",   "HRW",   "AG-WHE-0026", "AG-WHE-0024"),
-    _s("Wheat", "US Gulf",   "SRW",   "AG-WHE-0058", "AG-WHE-0057"),
-    _s("Wheat", "US PNW",    "SW",    "AG-WHE-0027", "AG-WHE-0025"),
-    _s("Wheat", "Argentina", "",      "AG-WHE-0003", None),
-    _s("Wheat", "Ukraine",   "11.5%", "AG-WHE-0018", None),
+    # ── Export FOB ($/mt, basis ¢/bu over CME) ──
+    _s("FOB", "Corn", "US Gulf",   "",     "AG-CRN-0075", "AG-CRN-0076"),
+    _s("FOB", "Corn", "US PNW",    "",     "AG-CRN-0077", "AG-CRN-0078"),
+    _s("FOB", "Corn", "Brazil",    "",     "AG-CRN-0071", "AG-CRN-0072"),
+    _s("FOB", "Corn", "Argentina", "",     "AG-CRN-0069", "AG-CRN-0070"),
+    _s("FOB", "Corn", "Ukraine",   "HIPP", "AG-CRN-0062", "AG-CRN-0063"),
+    _s("FOB", "Soybeans", "US Gulf",   "",       "AG-SYB-0020", "AG-SYB-0021"),
+    _s("FOB", "Soybeans", "US PNW",    "",       "AG-SYB-0022", "AG-SYB-0023"),
+    _s("FOB", "Soybeans", "Brazil",    "Santos", "AG-SYB-0014", "AG-SYB-0015"),
+    _s("FOB", "Soybeans", "Argentina", "",       "AG-SYB-0016", "AG-SYB-0017"),
+    _s("FOB", "Wheat", "US Gulf",   "HRW",   "AG-WHE-0026", "AG-WHE-0024"),
+    _s("FOB", "Wheat", "US Gulf",   "SRW",   "AG-WHE-0058", "AG-WHE-0057"),
+    _s("FOB", "Wheat", "US PNW",    "SW",    "AG-WHE-0027", "AG-WHE-0025"),
+    _s("FOB", "Wheat", "Argentina", "",      "AG-WHE-0003", None),
+    _s("FOB", "Wheat", "Ukraine",   "11.5%", "AG-WHE-0018", None),
+    # ── Soybean CFR China (delivered China), by shipment origin ──
+    _s("CFR China", "Soybeans", "US Gulf", "", "AG-SYB-0005", "AG-SYB-0006"),
+    _s("CFR China", "Soybeans", "US PNW",  "", "AG-SYB-0086", "AG-SYB-0087"),
+    _s("CFR China", "Soybeans", "Brazil",  "", "AG-SYB-0003", "AG-SYB-0004"),
+    # ── Ocean freight to Northeast Asia (China/Japan), $/mt, no basis ──
+    _s("Freight", "Freight", "US Gulf",   "", "FM-FRT-0003", None),
+    _s("Freight", "Freight", "US PNW",    "", "FM-FRT-0002", None),
+    _s("Freight", "Freight", "Brazil",    "", "FM-FRT-0001", None),
+    _s("Freight", "Freight", "Argentina", "", "FM-FRT-0004", None),
 ]
+
+
+def view_options():
+    """Ordered [{label, group, commodity}] for the trend/spread selectors."""
+    out, seen = [], set()
+    for r in SERIES:
+        gc = (r["group"], r["commodity"])
+        if gc in seen:
+            continue
+        seen.add(gc)
+        g, c = gc
+        if g == "FOB":
+            lbl = f"{c} FOB"
+        elif g == "CFR China":
+            lbl = f"{c} CFR China"
+        elif g == "Freight":
+            lbl = "Freight → NE Asia"
+        else:
+            lbl = f"{c} {g}"
+        out.append({"label": lbl, "group": g, "commodity": c})
+    return out
 
 # symbol -> (series, metric) so a stored row can be mapped back on read.
 SYMBOL_META = {}
