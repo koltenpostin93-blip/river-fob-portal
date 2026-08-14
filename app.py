@@ -1711,7 +1711,7 @@ def fob_vessel_frame(_sig):
         s, metric = meta
         disp = s["origin"] + (f" {s['label']}" if s["label"] else "")
         for d, v in series.items():
-            rows.append({"date": d, "group": s["group"],
+            rows.append({"date": d, "group": s.get("group", "FOB"),
                          "commodity": s["commodity"], "origin": s["origin"],
                          "grade": s["label"], "disp": disp, "metric": metric,
                          "value": v, "skey": s["key"]})
@@ -1752,6 +1752,19 @@ def _vessel_line_chart(data, title, unit, o_order, key):
 
 
 def render_fob_vessel_tab():
+    """Contain any error so a transient stale-module state (Cloud reloaded app.py
+    but kept an older fob_vessel in memory, before a full reboot) shows a notice
+    instead of crashing the whole app."""
+    try:
+        _render_fob_vessel_tab()
+    except Exception as e:
+        st.markdown("### 🚢 FOB Vessel")
+        st.warning("FOB Vessel is temporarily unavailable — if this persists, "
+                   "**Reboot app** on Streamlit Cloud (the data module updated "
+                   f"and needs a fresh load). [{type(e).__name__}]")
+
+
+def _render_fob_vessel_tab():
     st.markdown("### 🚢 FOB Vessel — export FOB, CFR China & freight")
     st.caption("Fastmarkets · export FOB (corn/soy/wheat), soybean CFR China, and "
                "ocean freight to NE Asia · US Gulf, PNW, Brazil, Argentina, Ukraine.")
