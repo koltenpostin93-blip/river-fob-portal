@@ -3272,3 +3272,27 @@ else:
                                spreads, as_of=as_of)
 
 st.caption("Mirrors JSA FOB Sheet · FOB = CIF − (tariff factor × freight%) ÷ 2000 × bushel weight")
+
+# Compliance disclaimer — shown at the bottom of every page (all tab branches).
+# The copyright year is taken from the calendar, so it rolls over automatically.
+_DISCLAIMER = (
+    "Trading commodity futures, options on futures, cash commodities, and "
+    "over-the-counter derivative products involves substantial risk of loss and "
+    "may not be suitable for all investors. This communication is provided for "
+    "informational purposes only and does not constitute investment advice, a "
+    "recommendation, or an offer or solicitation to buy or sell any futures, "
+    "options, cash commodities, or derivative products. John Stewart &amp; "
+    "Associates, Inc. does not accept orders to buy or sell any financial "
+    "instruments via email. The information contained herein has been obtained "
+    "from sources believed to be reliable; however, its accuracy and completeness "
+    "are not guaranteed. Any opinions expressed are solely those of the author, "
+    "are subject to change without notice, and should not be relied upon as a "
+    "basis for investment decisions. Past performance is not indicative of future "
+    "results. This message may contain confidential or proprietary information "
+    "intended solely for the use of the designated recipient. "
+    f"&copy; John Stewart &amp; Associates, Inc. {dt.date.today().year}")
+st.markdown(
+    '<div style="margin-top:1.5rem;padding-top:0.7rem;border-top:1px solid #e0e0e0;'
+    'font-size:0.68rem;line-height:1.4;color:#8a9199;text-align:justify;">'
+    f'{_DISCLAIMER}</div>',
+    unsafe_allow_html=True)
