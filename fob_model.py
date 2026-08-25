@@ -191,8 +191,14 @@ BLOCK_LAYOUT = [
 # ---------------------------------------------------------------------------
 
 def fob_value(cif, freight_pct, factor, bushel_weight):
-    """FOB barge basis for one location/month. Returns None if inputs missing."""
-    if cif is None or freight_pct is None:
+    """FOB barge basis for one location/month. Returns None if the CIF is missing,
+    or the barge freight is zero/blank.
+
+    A barge freight quote is never legitimately 0 — a 0 or blank means there's no
+    quote because the river is closed at that reach (typically the upper river in
+    winter). Computing FOB against zero freight would fabricate a value at the
+    "no-freight" level (= CIF), so treat it as undefined instead."""
+    if cif is None or not freight_pct:            # freight None or 0 -> closed
         return None
     return cif - (factor * freight_pct) / 2000 * bushel_weight
 
