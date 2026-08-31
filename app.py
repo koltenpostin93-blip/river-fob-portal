@@ -34,6 +34,7 @@ import bids_data
 import river_segments as RS
 import delivery_period as DP
 import fob_vessel
+import massive_futures
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -2966,6 +2967,47 @@ def apply_pasted_tables(cif_text, frt_text, fut_text):
     return msgs, errs
 
 
+def _pull_massive_futures():
+    """Fill the working CBOT row for every commodity from live Massive settlements
+    and recompute spreads (same fill path as the futures paste). Returns
+    (n_filled, [commodities], error_or_None)."""
+    if not massive_futures.configured():
+        return 0, [], "MASSIVE_API_KEY is not configured for this deployment."
+    filled, done = 0, []
+    for commodity in M.COMMODITIES:
+        try:
+            curve = massive_futures.cbot_curve(commodity)      # {letter: $/bu}
+        except Exception as e:
+            return filled, done, f"Massive API error: {e}"
+        if not curve:
+            continue
+        active = (st.session_state.get(f"contracts_{commodity}")
+                  or list(M.CONTRACTS[commodity]))
+        cur = st.session_state[f"cif_{commodity}"]
+        for i, mth in enumerate(M.MONTHS):
+            if i >= len(active):
+                break
+            letter = active[i][-1]
+            if letter in curve:
+                cur.loc[mth, "Futures"] = curve[letter]
+                filled += 1
+        st.session_state[f"cif_{commodity}"] = cur
+        seen = []
+        for code in active:
+            if code not in seen:
+                seen.append(code)
+        vals = {}
+        for j in range(len(seen) - 1):
+            p0, p1 = curve.get(seen[j][-1]), curve.get(seen[j + 1][-1])
+            if p0 is not None and p1 is not None:
+                vals[f"{seen[j]}/{seen[j + 1]}"] = round(p0 - p1, 4)
+        if vals:
+            st.session_state[f"carry_{commodity}"] = pd.DataFrame(
+                {lbl: [v] for lbl, v in vals.items()}, index=["Spread"])
+        done.append(commodity)
+    return filled, done, None
+
+
 def render_inputs_tab(as_of):
     with st.expander("📋 Paste daily tables (CIF & Barge Freight)"):
         pr = st.session_state.pop("paste_result", None)
@@ -2989,6 +3031,25 @@ def render_inputs_tab(as_of):
         if st.button("⤵ Parse & fill inputs", type="primary"):
             st.session_state["paste_result"] = apply_pasted_tables(
                 cif_text, frt_text, fut_text)
+            st.rerun()
+
+    # Live CBOT futures straight from Massive (no Barchart add-in needed).
+    pm = st.session_state.pop("massive_pull_msg", None)
+    if pm:
+        (st.success if pm[0] == "ok" else st.error)(pm[1])
+    if massive_futures.configured():
+        if st.button("🔄 Pull live CBOT futures (Massive)",
+                     help="Fill the CBOT row for corn/soy/wheat from live Massive "
+                          "settlements and recompute spreads — no Barchart add-in "
+                          "needed. Save to archive it."):
+            with st.spinner("Fetching live CBOT settlements…"):
+                n, done, err = _pull_massive_futures()
+            st.session_state["massive_pull_msg"] = (
+                ("error", f"Massive pull failed: {err}") if err else
+                ("ok", f"✓ Filled {n} live CBOT values ({', '.join(done)}). "
+                       "Review and Save to archive."))
+            if not err:
+                _bump_editors()
             st.rerun()
 
     ver = st.session_state.editor_ver
