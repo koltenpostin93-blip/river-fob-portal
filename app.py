@@ -2868,7 +2868,7 @@ def load_into_inputs(date_iso):
     return True
 
 
-def apply_pasted_tables(cif_text, frt_text, fut_text):
+def apply_pasted_tables(cif_text, frt_text, fut_text=""):
     """Fill the input editors from pasted CIF / freight / futures. -> (msgs, errs)."""
     msgs, errs = [], []
     if cif_text.strip():
@@ -3018,19 +3018,15 @@ def render_inputs_tab(as_of):
                 st.error(e)
         st.caption("Copy each table from your daily source and paste below "
                    "(headers included). MILO, TW and NW rows are ignored; the "
-                   "freight date auto-sets the as-of date; futures fill the CBOT "
-                   "row and compute spreads.")
-        pc1, pc2, pc3 = st.columns(3)
+                   "freight date auto-sets the as-of date. Futures come live from "
+                   "Massive — use the 🔄 button below.")
+        pc1, pc2 = st.columns(2)
         with pc1:
             cif_text = st.text_area("CIF NOLA table", height=220, key="paste_cif")
         with pc2:
             frt_text = st.text_area("Barge Freight table", height=220, key="paste_frt")
-        with pc3:
-            fut_text = st.text_area("Futures (Symbol / Last)", height=220,
-                                    key="paste_fut")
         if st.button("⤵ Parse & fill inputs", type="primary"):
-            st.session_state["paste_result"] = apply_pasted_tables(
-                cif_text, frt_text, fut_text)
+            st.session_state["paste_result"] = apply_pasted_tables(cif_text, frt_text)
             st.rerun()
 
     # Live CBOT futures straight from Massive (no Barchart add-in needed).
