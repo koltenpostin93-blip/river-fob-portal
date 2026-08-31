@@ -49,7 +49,8 @@ except ModuleNotFoundError:
 # reads the shared Supabase via os.getenv() — same pattern as the basis tracker.
 try:
     for _secret_key in ("DATABASE_URL", "BASIS_DATABASE_URL",
-                        "FOB_VESSEL_SERVICE_NAME", "FOB_VESSEL_API_KEY"):
+                        "FOB_VESSEL_SERVICE_NAME", "FOB_VESSEL_API_KEY",
+                        "MASSIVE_API_KEY"):
         if _secret_key in st.secrets and not os.environ.get(_secret_key):
             os.environ[_secret_key] = st.secrets[_secret_key]
 except Exception:

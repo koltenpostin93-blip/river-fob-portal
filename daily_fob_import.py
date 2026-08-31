@@ -36,6 +36,7 @@ except ImportError:
 import openpyxl
 import db
 import import_history as IH
+import massive_futures
 
 RECENT_TABS = 5                                    # import the last N trading days
 LOG_PATH = os.path.join(os.path.dirname(__file__), "daily_fob_import.log")
@@ -192,6 +193,22 @@ def main():
                             "band: %s  (use --force to import anyway).", tab, d,
                             ", ".join(f"{c} {m}={v}" for c, m, v in bad))
                 continue
+
+            # Live CBOT futures from Massive replace the workbook's Barchart-add-in
+            # row — but only for TODAY, since Massive quotes today's settlements,
+            # not a past day's. Past tabs keep their as-saved futures. Massive wins
+            # per month; anything it doesn't cover falls back to the workbook.
+            if d == today and massive_futures.configured():
+                try:
+                    live = massive_futures.futures_for_calendar(calendar, today)
+                    for c, mv in live.items():
+                        futures.setdefault(c, {}).update(mv)
+                    if live:
+                        log.info("  %-6s -> %s  CBOT futures from Massive (%s)",
+                                 tab, d, ", ".join(sorted(live)))
+                except Exception as e:
+                    log.warning("  Massive futures unavailable, keeping workbook "
+                                "CBOT: %s", e)
 
             spreads = IH.spreads_from(futures, calendar)   # from CBOT if present
             n_cif, n_frt = db.save_snapshot(
