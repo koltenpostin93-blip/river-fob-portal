@@ -1407,6 +1407,17 @@ def render_seasonal_tab():
     sel_years = [g for g in order if g in set(sel)] or recent5
     df5 = df[df["group"].isin(sel_years)].copy()
 
+    # Optional horizontal reference lines at each delivery point's CBOT
+    # delivery-equivalent basis — only on the FOB-basis view, where the scale is
+    # comparable (stored in ¢/bu, so /100 to the chart's $/bu).
+    de = getattr(M, "DELIVERY_EQUIV", {}).get(commodity, {})
+    show_de = False
+    if metric_key == "FOB" and de:
+        show_de = st.checkbox(
+            "Delivery-equivalent levels", value=True, key=f"seasonal_de_{commodity}",
+            help="Dashed grey lines at each delivery point's delivery-equivalent "
+                 "basis (Chicago, Seneca, Hennepin, Peoria, Havana).")
+
     # Optional overlay (Nearby only): the current forward curve — the latest
     # snapshot's basis for each forward delivery month, on the season axis.
     fwd = pd.DataFrame()
@@ -1539,6 +1550,19 @@ def render_seasonal_tab():
             tooltip=[alt.Tooltip("mon:N", title="Fwd month"),
                      alt.Tooltip("value:Q", format=val_fmt, title="Fwd basis")])
         layers.append(fwd_line)
+
+    if show_de:
+        de_df = pd.DataFrame([{"loc": loc, "lvl": round(v / 100.0, 4)}
+                              for loc, v in de.items() if v is not None])
+        de_base = alt.Chart(de_df).encode(
+            y=alt.Y("lvl:Q", title=None, axis=yaxis))
+        layers.append(de_base.mark_rule(
+            color="#8a8a8a", strokeWidth=1, strokeDash=[3, 3]).encode(
+            tooltip=[alt.Tooltip("loc:N", title="Delivery pt"),
+                     alt.Tooltip("lvl:Q", format=val_fmt, title="Del equiv")]))
+        layers.append(de_base.mark_text(
+            align="left", dx=6, dy=-4, fontSize=9, color="#6b6b6b").encode(
+            x=alt.value(6), text=alt.Text("loc:N")))
 
     chart = alt.layer(*layers).properties(
         height=400, background="transparent",
