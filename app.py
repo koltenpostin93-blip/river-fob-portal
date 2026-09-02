@@ -1407,16 +1407,19 @@ def render_seasonal_tab():
     sel_years = [g for g in order if g in set(sel)] or recent5
     df5 = df[df["group"].isin(sel_years)].copy()
 
-    # Optional horizontal reference lines at each delivery point's CBOT
-    # delivery-equivalent basis — only on the FOB-basis view, where the scale is
-    # comparable (stored in ¢/bu, so /100 to the chart's $/bu).
-    de = getattr(M, "DELIVERY_EQUIV", {}).get(commodity, {})
+    # Horizontal reference line at the SELECTED location's CBOT delivery-
+    # equivalent basis — only when that location is a delivery house (Chicago,
+    # Seneca, Hennepin, Peoria, Havana). Non-delivery locations (Burlington,
+    # Quincy, STL, …) show nothing. Stored in ¢/bu, so /100 to the chart's $/bu.
+    de_all = getattr(M, "DELIVERY_EQUIV", {}).get(commodity, {})
+    de = {location: de_all[location]} if location in de_all else {}
     show_de = False
     if metric_key == "FOB" and de:
         show_de = st.checkbox(
-            "Delivery-equivalent levels", value=True, key=f"seasonal_de_{commodity}",
-            help="Dashed grey lines at each delivery point's delivery-equivalent "
-                 "basis (Chicago, Seneca, Hennepin, Peoria, Havana).")
+            f"Delivery-equivalent level ({location})", value=True,
+            key=f"seasonal_de_{commodity}",
+            help="Dashed grey line at this delivery house's delivery-equivalent "
+                 "basis. Locations that aren't delivery houses show nothing.")
 
     yfit = st.radio(
         "Best fit", ["Full range", "Central 90%", "Central 75%"], horizontal=True,
