@@ -1418,6 +1418,13 @@ def render_seasonal_tab():
             help="Dashed grey lines at each delivery point's delivery-equivalent "
                  "basis (Chicago, Seneca, Hennepin, Peoria, Havana).")
 
+    yfit = st.radio(
+        "Best fit", ["Full range", "Central 90%", "Central 75%"], horizontal=True,
+        key=f"seasonal_yfit_{commodity}",
+        help="Zoom the Y-axis to the central 90% / 75% of the plotted years, "
+             "hiding extreme outliers so the typical range fills the chart. "
+             "Reference lines and the forward curve stay in view.")
+
     # Optional overlay (Nearby only): the current forward curve — the latest
     # snapshot's basis for each forward delivery month, on the season axis.
     fwd = pd.DataFrame()
@@ -1475,6 +1482,26 @@ def render_seasonal_tab():
         avg = (g.agg(value=("value", "mean"), season_date=("season_date", "min"))
                .reset_index().sort_values("season_date"))
 
+    # Best-fit Y domain: clip to the central percentile band of the plotted years
+    # so outliers don't squash the chart. Reference lines + forward curve are
+    # unioned in so they stay visible.
+    if yfit == "Full range":
+        yscale = alt.Scale(zero=False, nice=True)
+    else:
+        _v = df5["value"].dropna()
+        _q = 0.05 if yfit == "Central 90%" else 0.125
+        if len(_v) >= 8:
+            _lo, _hi = float(_v.quantile(_q)), float(_v.quantile(1 - _q))
+            _keep = [v / 100.0 for v in de.values() if v is not None] if show_de else []
+            if not fwd.empty:
+                _keep += [float(x) for x in fwd["value"].dropna()]
+            if _keep:
+                _lo, _hi = min(_lo, min(_keep)), max(_hi, max(_keep))
+            _pad = (_hi - _lo) * 0.06 or 0.05
+            yscale = alt.Scale(domain=[_lo - _pad, _hi + _pad], clamp=True, nice=False)
+        else:
+            yscale = alt.Scale(zero=False, nice=True)
+
     yaxis = alt.Axis(format=val_fmt, labelColor="#1f4e79", labelFontWeight="bold",
                      labelFontSize=12)
     xaxis = alt.Axis(format="%b", tickCount="month", labelColor="#1f4e79",
@@ -1496,9 +1523,9 @@ def render_seasonal_tab():
     layers = []
     if not band.empty:
         band_area = alt.Chart(band.assign(lbl=f"{n10}-Yr Range")).mark_area(
-            color="#b7c7db", opacity=0.45).encode(
+            color="#b7c7db", opacity=0.45, clip=True).encode(
             x=alt.X("season_date:T", title=None, axis=xaxis),
-            y=alt.Y("lo:Q", title=None, axis=yaxis), y2="hi:Q",
+            y=alt.Y("lo:Q", title=None, axis=yaxis, scale=yscale), y2="hi:Q",
             tooltip=[alt.Tooltip("lbl:N", title="Band"),
                      alt.Tooltip("lo:Q", format=val_fmt, title="Min"),
                      alt.Tooltip("hi:Q", format=val_fmt, title="Max")])
@@ -1520,33 +1547,35 @@ def render_seasonal_tab():
     df_faint = df5[~df5["group"].isin(prom_set)]
     if not df_faint.empty:
         layers.append(alt.Chart(df_faint).mark_line(
-            point=False, strokeWidth=1.3, opacity=0.16).encode(
+            point=False, strokeWidth=1.3, opacity=0.16, clip=True).encode(
             x=alt.X("season_date:T", title=None, axis=xaxis),
-            y=alt.Y("value:Q", title=None, axis=yaxis),
+            y=alt.Y("value:Q", title=None, axis=yaxis, scale=yscale),
             color=color_enc, tooltip=line_tt))
     df_prom = df5[df5["group"].isin(prom_set)]
     if not df_prom.empty:
-        layers.append(alt.Chart(df_prom).mark_line(point=False, opacity=0.95).encode(
+        layers.append(alt.Chart(df_prom).mark_line(
+            point=False, opacity=0.95, clip=True).encode(
             x=alt.X("season_date:T", title=None, axis=xaxis),
-            y=alt.Y("value:Q", title=None, axis=yaxis),
+            y=alt.Y("value:Q", title=None, axis=yaxis, scale=yscale),
             color=color_enc,
             size=alt.condition("datum.Current", alt.value(4.5), alt.value(3)),
             tooltip=line_tt))
 
     if not avg.empty:
         avg_line = alt.Chart(avg.assign(lbl=f"{n10}-Yr Avg")).mark_line(
-            color="#111111", strokeWidth=3, strokeDash=[7, 4]).encode(
-            x="season_date:T", y="value:Q",
+            color="#111111", strokeWidth=3, strokeDash=[7, 4], clip=True).encode(
+            x="season_date:T", y=alt.Y("value:Q", scale=yscale),
             tooltip=[alt.Tooltip("lbl:N", title="Series"),
                      alt.Tooltip("value:Q", format=val_fmt, title="Avg")])
         layers.append(avg_line)
 
     if not fwd.empty:
         fwd_line = alt.Chart(fwd.assign(lbl="Fwd Curve")).mark_line(
-            color="#7b2cbf", strokeWidth=4.5, strokeDash=[5, 3],
+            color="#7b2cbf", strokeWidth=4.5, strokeDash=[5, 3], clip=True,
             point=alt.OverlayMarkDef(color="#7b2cbf", size=95, shape="diamond")
         ).encode(
-            x="season_date:T", y="value:Q", order=alt.Order("season_date:T"),
+            x="season_date:T", y=alt.Y("value:Q", scale=yscale),
+            order=alt.Order("season_date:T"),
             tooltip=[alt.Tooltip("mon:N", title="Fwd month"),
                      alt.Tooltip("value:Q", format=val_fmt, title="Fwd basis")])
         layers.append(fwd_line)
@@ -1555,13 +1584,13 @@ def render_seasonal_tab():
         de_df = pd.DataFrame([{"loc": loc, "lvl": round(v / 100.0, 4)}
                               for loc, v in de.items() if v is not None])
         de_base = alt.Chart(de_df).encode(
-            y=alt.Y("lvl:Q", title=None, axis=yaxis))
+            y=alt.Y("lvl:Q", title=None, axis=yaxis, scale=yscale))
         layers.append(de_base.mark_rule(
-            color="#8a8a8a", strokeWidth=1, strokeDash=[3, 3]).encode(
+            color="#8a8a8a", strokeWidth=1, strokeDash=[3, 3], clip=True).encode(
             tooltip=[alt.Tooltip("loc:N", title="Delivery pt"),
                      alt.Tooltip("lvl:Q", format=val_fmt, title="Del equiv")]))
         layers.append(de_base.mark_text(
-            align="left", dx=6, dy=-4, fontSize=9, color="#6b6b6b").encode(
+            align="left", dx=6, dy=-4, fontSize=9, color="#6b6b6b", clip=True).encode(
             x=alt.value(6), text=alt.Text("loc:N")))
 
     chart = alt.layer(*layers).properties(
