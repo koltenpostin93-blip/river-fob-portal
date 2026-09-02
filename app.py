@@ -1423,6 +1423,7 @@ def render_seasonal_tab():
 
     yfit = st.radio(
         "Best fit", ["Full range", "Central 90%", "Central 75%"], horizontal=True,
+        index=1,
         key=f"seasonal_yfit_{commodity}",
         help="Zoom the Y-axis to the central 90% / 75% of the plotted years, "
              "hiding extreme outliers so the typical range fills the chart. "
