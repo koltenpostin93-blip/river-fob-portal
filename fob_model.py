@@ -122,6 +122,7 @@ LOCATIONS = [
     Location("Chicago",           5.78, "IL",              "Illinois River"),
     Location("Seneca",            5.24, "IL",              "Illinois River"),
     Location("Hennepin",          5.07, "IL",              "Illinois River"),
+    Location("Lacon",             5.07, "IL",              "Illinois River"),
     Location("Peoria",            4.81, "IL",              "Illinois River"),
     Location("Havana",            4.64, "IL",              "Illinois River"),
 ]
@@ -139,9 +140,9 @@ FACTOR = {loc.name: loc.factor for loc in LOCATIONS}
 # only. Values supplied by the desk.
 DELIVERY_EQUIV = {
     "Corn":     {"Chicago": 6.00, "Seneca": 10.75, "Hennepin": 12.25,
-                 "Peoria": 14.75, "Havana": 16.25},
+                 "Lacon": 12.25, "Peoria": 14.75, "Havana": 16.25},
     "Soybeans": {"Chicago": 12.00, "Seneca": 16.75, "Hennepin": 18.25,
-                 "Peoria": 20.75, "Havana": 22.25},
+                 "Lacon": 18.25, "Peoria": 20.75, "Havana": 22.25},
     "Wheat":    {"STL": 28.25},
 }
 
@@ -165,6 +166,7 @@ BLOCK_LAYOUT = [
     ("fob", "Chicago"),
     ("fob", "Seneca"),
     ("fob", "Hennepin"),
+    ("fob", "Lacon"),
     ("fob", "Peoria"),
     ("fob", "Havana"),
     ("reach", "St. Louis"),
