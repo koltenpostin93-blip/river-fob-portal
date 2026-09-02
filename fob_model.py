@@ -145,6 +145,14 @@ DELIVERY_EQUIV = {
     "Wheat":    {"STL": 28.25},
 }
 
+# CBOT Illinois-River corn/soybean delivery zones: FOB location -> zone number.
+# A location shares its zone's delivery-equivalent level (e.g. Lacon = Zone 3 =
+# Hennepin's level). Locations not listed here aren't delivery houses.
+DELIVERY_ZONE = {
+    "Chicago": 1, "Seneca": 2, "Hennepin": 3, "Lacon": 3, "Peoria": 4,
+    "Havana": 5,
+}
+
 # Exact vertical row order of a commodity block, mirroring the workbook.
 # Each entry is one of:
 #   ("reach",   reach_heading)                      grey centered header row

@@ -1584,13 +1584,15 @@ def render_seasonal_tab():
         layers.append(fwd_line)
 
     if show_de:
-        de_df = pd.DataFrame([{"loc": loc, "lvl": round(v / 100.0, 4)}
-                              for loc, v in de.items() if v is not None])
+        _z = getattr(M, "DELIVERY_ZONE", {}).get(location)
+        _lab = f"Zone {_z}" if _z else location
+        de_df = pd.DataFrame([{"loc": _lab, "lvl": round(v / 100.0, 4)}
+                              for v in de.values() if v is not None])
         de_base = alt.Chart(de_df).encode(
             y=alt.Y("lvl:Q", title=None, axis=yaxis, scale=yscale))
         layers.append(de_base.mark_rule(
             color="#8a8a8a", strokeWidth=1, strokeDash=[3, 3], clip=True).encode(
-            tooltip=[alt.Tooltip("loc:N", title="Delivery pt"),
+            tooltip=[alt.Tooltip("loc:N", title="Delivery zone"),
                      alt.Tooltip("lvl:Q", format=val_fmt, title="Del equiv")]))
         layers.append(de_base.mark_text(
             align="left", dx=6, dy=-4, fontSize=9, color="#6b6b6b", clip=True).encode(
