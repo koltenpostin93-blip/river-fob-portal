@@ -44,6 +44,31 @@ def cbot_curve(commodity, as_of=None):
     return out
 
 
+# Full-carry convention (matches the cost-of-carry calculator): the reference
+# workbook uses fed funds + 2.25% as the interest leg of full carry.
+FED_FUNDS_SPREAD_PCT = 2.25
+
+
+def fed_funds_rate(as_of=None):
+    """Live front-month fed funds rate (%) from CME ZQ, or None if unavailable.
+    Same source the cost-of-carry calculator uses."""
+    if not configured():
+        return None
+    as_of = as_of or dt.date.today()
+    try:
+        return MA.get_fed_funds_rate(_key(), as_of)["rate_pct"]
+    except Exception:
+        return None
+
+
+def interest_rate_pct(as_of=None):
+    """Default annual interest rate for full carry: live fed funds + 2.25%.
+    Returns None if the live rate can't be read (caller falls back to a static
+    seed)."""
+    ff = fed_funds_rate(as_of)
+    return None if ff is None else round(ff + FED_FUNDS_SPREAD_PCT, 2)
+
+
 def futures_for_calendar(calendar, as_of=None):
     """calendar: {commodity: [(month, contract), ...]} from a snapshot's chain.
     -> {commodity: {month: price $/bu}} using live CBOT settlements. Commodities

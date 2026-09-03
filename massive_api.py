@@ -117,3 +117,31 @@ def get_futures_curve(product_code: str, api_key: str, as_of: date, n_contracts:
             }
         )
     return pd.DataFrame(rows)
+
+
+FED_FUNDS_PRODUCT = "ZQ"
+
+
+def get_fed_funds_rate(api_key: str, as_of: date) -> dict:
+    """Front-month CME 30-Day Federal Funds futures (ZQ) as an implied rate.
+
+    ZQ settles against the average daily effective fed funds rate for its contract
+    month, quoted as 100 - rate, so the front contract is the market's read on the
+    current fed funds rate. Needs a high contract limit: ZQ's /contracts response is
+    dominated by butterfly/spread combos, and a small limit truncates the outrights
+    before the nearby months appear.
+    """
+    contracts = get_active_contract_tickers(FED_FUNDS_PRODUCT, api_key, as_of, limit=1000)
+    if not contracts:
+        raise MassiveApiError("No active ZQ (fed funds) contracts returned.")
+    front = contracts[0]
+    snaps = get_snapshots([front["ticker"]], api_key)
+    price = _extract_price(snaps.get(front["ticker"], {}))
+    if price is None:
+        raise MassiveApiError(f"No price available for fed funds contract {front['ticker']}.")
+    return {
+        "ticker": front["ticker"],
+        "expiration": pd.to_datetime(front["expiration"]).date(),
+        "price": float(price),
+        "rate_pct": round(100.0 - float(price), 3),
+    }

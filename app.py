@@ -540,7 +540,11 @@ def _init_state():
         if f"storage_{c}" not in st.session_state:
             st.session_state[f"storage_{c}"] = S.SEED_STORAGE_MO[c]
     if "interest_pct" not in st.session_state:
-        st.session_state.interest_pct = S.SEED_INTEREST_PCT
+        # Default to the live front-month fed funds + 2.25% (same source and
+        # convention as the cost-of-carry sheet); fall back to the static seed
+        # if the live rate can't be read. Still editable below.
+        _ff = _live_fed_funds(dt.date.today().isoformat())
+        st.session_state.interest_pct = _ff["rate"] if _ff else S.SEED_INTEREST_PCT
     if "editor_ver" not in st.session_state:
         st.session_state.editor_ver = 0
 
@@ -687,7 +691,20 @@ with st.sidebar:
         st.session_state.interest_pct = st.number_input(
             "Annual interest rate (%)", value=float(st.session_state.interest_pct),
             step=0.25, format="%.2f",
-            help="Used for % Full Carry; storage is per-commodity on the Inputs tab.")
+            help="Used for % Full Carry; storage is per-commodity on the Inputs tab. "
+                 "Defaults to live front-month fed funds + "
+                 f"{massive_futures.FED_FUNDS_SPREAD_PCT:.2f}% (CME ZQ).")
+        _ff = _live_fed_funds(dt.date.today().isoformat())
+        if _ff:
+            st.caption(
+                f"Live fed funds **{_ff['ff']:.3f}%** + "
+                f"{massive_futures.FED_FUNDS_SPREAD_PCT:.2f}% = **{_ff['rate']:.2f}%**")
+            if abs(float(st.session_state.interest_pct) - _ff["rate"]) > 1e-9:
+                if st.button("↺ Reset to live rate", key="reset_interest_live"):
+                    st.session_state.interest_pct = _ff["rate"]
+                    st.rerun()
+        else:
+            st.caption("Live fed funds unavailable — using a static default.")
 
         st.divider()
         st.subheader("Archive")
@@ -2031,6 +2048,21 @@ def _bids_current(since_iso, _schema):
 @st.cache_data(show_spinner=False, ttl=900)
 def _bids_history(grain, since_iso, _schema):
     return bids_data.bid_history(grain, since_iso)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _live_fed_funds(as_of_iso):
+    """Live front-month fed funds rate and the full-carry interest default it
+    implies (fed funds + 2.25%, the cost-of-carry convention). Returns a dict
+    {ff, rate} or None if the live rate can't be read. Cached hourly — it moves
+    in basis points."""
+    try:
+        ff = massive_futures.fed_funds_rate(dt.date.fromisoformat(as_of_iso))
+    except Exception:
+        ff = None
+    if ff is None:
+        return None
+    return {"ff": ff, "rate": round(ff + massive_futures.FED_FUNDS_SPREAD_PCT, 2)}
 
 
 def _exp_month_order(m):
