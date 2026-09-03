@@ -2752,6 +2752,25 @@ def _fob_sheet_actions(commodity, as_of, hist=None):
                  key=f"fobpng_{commodity}")
 
 
+BARGE_DASH_URL = "https://agtransport.usda.gov/stories/s/Barge-Dashboard/965a-yzgy/"
+
+
+def render_barge_dashboard_tab():
+    """USDA AgTransport's Barge Dashboard, embedded for in-app review — the
+    public data behind the barge-freight moves shown on the Changes tab. If
+    USDA blocks framing the embed shows blank, so the direct link is always
+    offered above it."""
+    st.markdown("#### 🚢 USDA Barge Dashboard")
+    st.markdown(
+        '<div class="resource-link">🔗&nbsp;<b>Source:</b> '
+        f'<a href="{BARGE_DASH_URL}" target="_blank" rel="noopener">'
+        'USDA AgTransport — Barge Dashboard</a>'
+        '<span class="rl-sub"> &middot; weekly barge grain movements, tonnage &amp; '
+        'freight rates. Open in a new tab if the view below is blank.</span></div>',
+        unsafe_allow_html=True)
+    components.iframe(BARGE_DASH_URL, height=900, scrolling=True)
+
+
 def render_changes_tab(as_of, cur=None, allow_download=True):
     # cur = (cif, freight) to use as the "current" side (an archived snapshot in
     # read-only mode); otherwise the live working inputs.
@@ -2834,16 +2853,6 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
         st.markdown(f'<div id="{snap_id}" class="sheet-wrap">'
                     f'<table class="sheet">{"".join(rows)}</table></div>',
                     unsafe_allow_html=True)
-
-    # External resource: USDA's barge dashboard — weekly barge grain movements,
-    # tonnage and rates that sit behind the freight moves shown here.
-    st.markdown(
-        '<div class="resource-link">🔗&nbsp;<b>Resource:</b> '
-        '<a href="https://agtransport.usda.gov/stories/s/Barge-Dashboard/965a-yzgy/" '
-        'target="_blank" rel="noopener">USDA AgTransport — Barge Dashboard</a>'
-        '<span class="rl-sub"> &middot; weekly barge grain movements, tonnage &amp; '
-        'freight rates</span></div>',
-        unsafe_allow_html=True)
 
     # --- Daily: CIF, barge freight, and FOB by location, vs prior day ---
     st.markdown("#### Daily Changes")
@@ -3373,58 +3382,64 @@ if VIEW_ONLY:
     else:
         tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
                        + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
-                          "🚢 FOB Vessel"])
+                          "🚢 FOB Vessel", "⚓ Barge Data"])
         with tabs[0]:
             render_changes_tab(view_date, cur=(hist_cif, hist_frt),
                                allow_download=False)
         for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
             with tab:
                 _render_archived_commodity(commodity)
-        with tabs[-4]:
+        with tabs[-5]:
             render_seasonal_tab()
-        with tabs[-3]:
+        with tabs[-4]:
             render_cashdel_tab()
-        with tabs[-2]:
+        with tabs[-3]:
             render_riverbids_tab()
-        with tabs[-1]:
+        with tabs[-2]:
             render_fob_vessel_tab()
+        with tabs[-1]:
+            render_barge_dashboard_tab()
 elif HIST_DATE:
     tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
                    + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
-                      "🚢 FOB Vessel", "📤 Export"])
+                      "🚢 FOB Vessel", "📤 Export", "⚓ Barge Data"])
     with tabs[0]:
         render_changes_tab(view_date, cur=(hist_cif, hist_frt))
-    with tabs[-5]:
+    with tabs[-6]:
         render_seasonal_tab()
-    with tabs[-4]:
+    with tabs[-5]:
         render_cashdel_tab()
-    with tabs[-3]:
+    with tabs[-4]:
         render_riverbids_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_fob_vessel_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_export_tab()
+    with tabs[-1]:
+        render_barge_dashboard_tab()
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
 else:
     tabs = st.tabs(["📊 Changes", "📝 Inputs"] + M.COMMODITIES
                    + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
-                      "🚢 FOB Vessel", "📤 Export"])
+                      "🚢 FOB Vessel", "📤 Export", "⚓ Barge Data"])
     with tabs[0]:
         render_changes_tab(as_of)
     with tabs[1]:
         render_inputs_tab(as_of)
-    with tabs[-5]:
+    with tabs[-6]:
         render_seasonal_tab()
-    with tabs[-4]:
+    with tabs[-5]:
         render_cashdel_tab()
-    with tabs[-3]:
+    with tabs[-4]:
         render_riverbids_tab()
-    with tabs[-2]:
+    with tabs[-3]:
         render_fob_vessel_tab()
-    with tabs[-1]:
+    with tabs[-2]:
         render_export_tab()
+    with tabs[-1]:
+        render_barge_dashboard_tab()
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
