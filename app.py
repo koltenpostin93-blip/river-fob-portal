@@ -3114,17 +3114,97 @@ def _corridor_table_block(as_of, sides, kind, snap_id, allow_download,
 
 
 def render_changes_tab(as_of, cur=None, allow_download=True):
-    """Corridor trends: one filterable table of Spot / WoW change / forward
-    months / 5-year seasonal average per corridor, across barge freight and
-    corn / soybean FOB."""
-    sides = _trend_sides(as_of, cur)
+    """The original Daily and Weekly change boards, followed by the filterable
+    corridor-trends table (Spot / WoW / forward months / 5-yr avg)."""
+    # Shared data: current side (archived snapshot in read-only mode, else live
+    # inputs), plus the prior-day and ~1-week-ago archived snapshots.
+    if cur is not None:
+        cur_cif, cur_frt = cur
+    else:
+        cur_cif, cur_frt, _ = _current_payloads()
+    cur_lbl = "selected date" if cur is not None else "working"
+    before = [d for d in sorted(db.list_dates()) if str(d)[:10] < as_of.isoformat()]
+    pdaily = before[-1] if before else None
+    pweek = None
+    if before:
+        tgt = as_of - dt.timedelta(days=7)
+        pweek = min(before, key=lambda d: abs(
+            (dt.date.fromisoformat(str(d)[:10]) - tgt).days))
+    d_cif, d_frt, _ = db.load_snapshot(pdaily) if pdaily else (None, None, None)
+    w_cif, w_frt, _ = db.load_snapshot(pweek) if pweek else (None, None, None)
+    d_cif, d_frt = d_cif or {}, d_frt or {}
+    w_cif, w_frt = w_cif or {}, w_frt or {}
+    ncol = len(M.MONTHS) + 1
+    banner = "background:linear-gradient(135deg,#0693e3,#32373c)"
+
+    def hdr(title):
+        return (f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{title}'
+                f'</td></tr><tr class="hdr months"><td class="lbl"></td>'
+                + "".join(f"<td>{m}</td>" for m in M.MONTHS) + "</tr>")
+
+    # --- Daily: CIF + barge freight, vs prior day ---
+    st.markdown("#### Daily Changes")
+    if allow_download:
+        _snap_toolbar("snap_daily_chg", f"Daily CIF Changes {as_of:%m-%d-%y}")
+
+    rows = [hdr("Daily Changes")]
+    rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
+    for c in M.COMMODITIES:
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (d_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">{c}</td>{cells}</tr>')
+    rows.append(f'<tr class="section"><td colspan="{ncol}">Barge Freight</td></tr>')
+    for r in M.FREIGHT_REGIONS:
+        cells = "".join(_chg_cell((cur_frt.get(r) or {}).get(m),
+                                  (d_frt.get(r) or {}).get(m), "pct")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
+    st.markdown(f'<div id="snap_daily_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
+    st.caption(f"Day-over-day: {cur_lbl} values vs prior archived date "
+               f"({pdaily or 'none'}).")
+
+    # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
+    st.markdown("#### Weekly Changes")
+    if allow_download:
+        _snap_toolbar("snap_weekly_chg", f"Weekly CIF Changes {as_of:%m-%d-%y}")
+
+    rows = [hdr("Weekly Changes")]
+    rows.append(f'<tr class="section"><td colspan="{ncol}">STL Freight</td></tr>')
+    cells = "".join(_chg_cell((cur_frt.get("STL") or {}).get(m),
+                              (w_frt.get("STL") or {}).get(m), "pct")
+                    for m in M.MONTHS)
+    rows.append(f'<tr class="frt-row"><td class="lbl">—</td>{cells}</tr>')
+    for c in M.COMMODITIES:
+        rows.append(f'<tr class="section"><td colspan="{ncol}">{c}</td></tr>')
+        cur_fob = M.compute_fob_grid(c, cur_cif.get(c) or {}, cur_frt)["STL"]
+        w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
+                 if w_cif.get(c) else {})
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (w_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
+        cells = "".join(_chg_cell(cur_fob.get(m), w_fob.get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">FOB</td>{cells}</tr>')
+    st.markdown(f'<div id="snap_weekly_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
+    st.caption(f"Week-over-week: {cur_lbl} values vs ~7 days ago "
+               f"({pweek or 'none'}).")
+
+    # --- Corridor trends table (filterable) at the bottom ---
+    st.divider()
+    st.markdown("#### Corridor Trends")
     metric = st.radio("View", TREND_METRICS, horizontal=True, key="trend_metric",
                       help="Switch the table between barge freight and corn / "
                            "soybean FOB — same corridors throughout.")
     kind = ("freight" if metric == "Barge Freight"
             else "Corn" if metric == "FOB Corn" else "Soybeans")
-    _corridor_table_block(as_of, sides, kind, "snap_trends", allow_download,
-                          cur is not None)
+    _corridor_table_block(as_of, (cur_cif, cur_frt, w_cif, w_frt), kind,
+                          "snap_trends", allow_download, cur is not None)
 
 
 def load_prior(commodity, as_of_iso, cash_c):
