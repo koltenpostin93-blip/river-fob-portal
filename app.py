@@ -201,6 +201,37 @@ st.markdown(
       .resource-link a:hover {{ text-decoration: underline; }}
       .resource-link .rl-sub {{ color: #6b7280; }}
 
+      /* Corridor-trends table (Changes + Barge tabs) */
+      .trend-wrap {{
+        border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;
+        background: #fff; box-shadow: 0 1px 3px rgba(50,55,60,0.08);
+        margin-bottom: 6px;
+      }}
+      .trend-title {{
+        background: #f3f4f6; padding: 14px 18px; font-size: 1.12rem;
+        font-weight: 700; color: {JPSI_DARK};
+        border-bottom: 1px solid #e5e7eb;
+      }}
+      .trend-tbl {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; }}
+      .trend-tbl th {{
+        text-align: right; padding: 12px 14px; font-weight: 700;
+        color: #374151; border-bottom: 2px solid #e5e7eb; white-space: nowrap;
+      }}
+      .trend-tbl th.loch {{ text-align: left; }}
+      .trend-tbl td {{
+        text-align: right; padding: 11px 14px; border-bottom: 1px solid #f1f1f1;
+        color: #111827; white-space: nowrap;
+      }}
+      .trend-tbl td.loc {{ text-align: left; color: #c2410c; font-weight: 600; }}
+      .trend-tbl tr:nth-child(even) td {{ background: #fafafa; }}
+      .trend-tbl tr:hover td {{ background: #eef6fc; }}
+      .trend-tbl td.pos {{ color: #0d7f3d; font-weight: 700; }}
+      .trend-tbl td.neg {{ color: #c00000; font-weight: 700; }}
+      .trend-foot {{
+        font-style: italic; color: #6b7280; font-size: 0.78rem;
+        padding: 4px 4px 12px;
+      }}
+
       /* Table styling */
       .sheet {{
         width: 100%; border-collapse: collapse; font-size: 0.85rem;
@@ -2755,11 +2786,14 @@ def _fob_sheet_actions(commodity, as_of, hist=None):
 BARGE_DASH_URL = "https://agtransport.usda.gov/stories/s/Barge-Dashboard/965a-yzgy/"
 
 
-def render_barge_dashboard_tab():
-    """USDA AgTransport's Barge Dashboard, embedded for in-app review — the
-    public data behind the barge-freight moves shown on the Changes tab. If
-    USDA blocks framing the embed shows blank, so the direct link is always
-    offered above it."""
+def render_barge_dashboard_tab(as_of, cur=None, allow_download=True):
+    """JSA barge-freight corridor trends (same look as the Changes tab) above
+    USDA AgTransport's Barge Dashboard, embedded for in-app review. If USDA
+    blocks framing the embed shows blank, so the direct link is offered too."""
+    st.markdown("#### ⚓ Barge Freight Trends")
+    _corridor_table_block(as_of, _trend_sides(as_of, cur), "freight",
+                          "snap_barge_trends", allow_download, cur is not None)
+
     st.markdown("#### 🚢 USDA Barge Dashboard")
     st.markdown(
         '<div class="resource-link">🔗&nbsp;<b>Source:</b> '
@@ -2771,94 +2805,176 @@ def render_barge_dashboard_tab():
     components.iframe(BARGE_DASH_URL, height=900, scrolling=True)
 
 
-def render_changes_tab(as_of, cur=None, allow_download=True):
-    # cur = (cif, freight) to use as the "current" side (an archived snapshot in
-    # read-only mode); otherwise the live working inputs.
+# Corridor trends config. Rows are the barge-freight corridors; for the FOB
+# views each corridor maps to a representative river delivery point so the
+# filter keeps the same rows throughout.
+TREND_METRICS = ["Barge Freight", "FOB Corn", "FOB Soybeans"]
+N_FORWARD = 2  # forward-month columns shown after Spot
+CORRIDOR_REP_FOB = {
+    "Lower Miss": "Memphis",
+    "Davenport South": "Davenport",
+    "McGregor South": "Prairie du Chien",
+    "Upper Miss": "Savage",
+    "Ohio": "Cincy",
+    "STL": "STL",
+    "IL": "Peoria",
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _corridor_5yr_avg(as_of_iso, kind):
+    """Per-corridor average of the 'spot' reading (each snapshot's own front
+    month) over the last 5 years, anchored to the same calendar date so the
+    average is seasonal. kind: 'freight' | 'Corn' | 'Soybeans'. Cached hourly.
+    Returns {region: avg or None}."""
+    as_of = dt.date.fromisoformat(as_of_iso)
+    parsed = [(str(d)[:10], dt.date.fromisoformat(str(d)[:10])) for d in db.list_dates()]
+    acc = {r: [] for r in M.FREIGHT_REGIONS}
+    for k in range(1, 6):
+        target = dt.date(as_of.year - k, as_of.month, min(as_of.day, 28))
+        nearest, best = None, None
+        for s, d in parsed:
+            diff = abs((d - target).days)
+            if best is None or diff < best:
+                best, nearest = diff, s
+        if nearest is None or best > 45:          # no snapshot near that season
+            continue
+        cif, frt, cal = db.load_snapshot(nearest)
+        hist_months = [m for m, _ in (cal or {}).get("Corn", [])]
+        if not hist_months:
+            continue
+        front = hist_months[0]
+        if kind == "freight":
+            for region in M.FREIGHT_REGIONS:
+                v = ((frt or {}).get(region) or {}).get(front)
+                if v is not None:
+                    acc[region].append(v)
+        else:
+            grid = M.compute_fob_grid(kind, (cif or {}).get(kind) or {},
+                                      frt or {}, hist_months)
+            for region, loc in CORRIDOR_REP_FOB.items():
+                v = (grid.get(loc) or {}).get(front)
+                if v is not None:
+                    acc[region].append(v)
+    return {r: (sum(v) / len(v) if v else None) for r, v in acc.items()}
+
+
+def _trend_sides(as_of, cur):
+    """(cur_cif, cur_frt, w_cif, w_frt): the current side (an archived snapshot
+    in read-only mode, else the live inputs) plus the ~1-week-ago archived
+    snapshot used for the WoW column."""
     if cur is not None:
         cur_cif, cur_frt = cur
     else:
         cur_cif, cur_frt, _ = _current_payloads()
-    cur_lbl = "selected date" if cur is not None else "working"
-    dates = sorted(db.list_dates())
-    before = [d for d in dates if d < as_of.isoformat()]
-    pdaily = before[-1] if before else None
+    before = [d for d in sorted(db.list_dates()) if str(d)[:10] < as_of.isoformat()]
     pweek = None
     if before:
         tgt = as_of - dt.timedelta(days=7)
-        pweek = min(before, key=lambda d: abs((dt.date.fromisoformat(d) - tgt).days))
-    d_cif, d_frt, _ = db.load_snapshot(pdaily) if pdaily else (None, None, None)
-    w_cif, w_frt, _ = db.load_snapshot(pweek) if pweek else (None, None, None)
-    d_cif, d_frt = d_cif or {}, d_frt or {}
-    w_cif, w_frt = w_cif or {}, w_frt or {}
-    ncol = len(M.MONTHS) + 1
-    banner = "background:linear-gradient(135deg,#0693e3,#32373c)"
+        pweek = min(before, key=lambda d: abs(
+            (dt.date.fromisoformat(str(d)[:10]) - tgt).days))
+    w_cif, w_frt, _ = db.load_snapshot(pweek) if pweek else ({}, {}, None)
+    return cur_cif, cur_frt, (w_cif or {}), (w_frt or {})
 
-    def hdr(title):
-        return (f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{title}'
-                f'</td></tr><tr class="hdr months"><td class="lbl"></td>'
-                + "".join(f"<td>{m}</td>" for m in M.MONTHS) + "</tr>")
 
-    # --- Daily: CIF + barge freight, vs prior day ---
-    st.markdown("#### Daily Changes")
+def _corridor_table_block(as_of, sides, kind, snap_id, allow_download,
+                          cur_is_archived):
+    """Render one corridor-trends table for a metric. kind: 'freight' | 'Corn'
+    | 'Soybeans'. Shared by the Changes tab (filterable) and the Barge tab
+    (freight only)."""
+    cur_cif, cur_frt, w_cif, w_frt = sides
+    if kind == "freight":
+        commodity = None
+        title = "Barge Freight Rates — Percentage of Tariff"
+    else:
+        commodity = kind
+        title = f"{commodity} FOB Basis — by Corridor ($/bu)"
+
+    months = M.MONTHS
+    spot_m = months[0]
+    fwd_ms = list(months[1:1 + N_FORWARD])
+
+    def _m_year(label):
+        n = _month_num(label)
+        return as_of.year if (n is None or n >= as_of.month) else as_of.year + 1
+
+    cur_grid = wk_grid = None
+    if kind != "freight":
+        cur_grid = M.compute_fob_grid(commodity, cur_cif.get(commodity) or {}, cur_frt)
+        wk_grid = (M.compute_fob_grid(commodity, w_cif.get(commodity) or {}, w_frt)
+                   if w_cif.get(commodity) else {})
+
+    def _val(region, m, grid, frt):
+        if kind == "freight":
+            return (frt.get(region) or {}).get(m)
+        return (grid.get(CORRIDOR_REP_FOB[region]) or {}).get(m) if grid else None
+
+    def _lvl(v):
+        if v is None or pd.isna(v):
+            return "N/A"
+        return f"{v * 100:.0f}%" if kind == "freight" else f"{v:.2f}"
+
+    def _chg(d):
+        if d is None or pd.isna(d):
+            return "", ""
+        cls = "pos" if d > 1e-12 else ("neg" if d < -1e-12 else "")
+        txt = f"{d * 100:+.0f} pp" if kind == "freight" else f"{d:+.2f}"
+        return txt, cls
+
+    avg_map = _corridor_5yr_avg(as_of.isoformat(), kind)
+    fwd_hdr = "".join(f"<th>{m} {_m_year(m)}</th>" for m in fwd_ms)
+    head = (f'<tr><th class="loch">Corridor</th>'
+            f'<th>Spot ({spot_m} {_m_year(spot_m)})</th>'
+            f'<th>Change (WoW)</th>{fwd_hdr}'
+            f'<th>5-Yr Avg</th><th>vs 5-Yr Avg</th></tr>')
+
+    body = []
+    for region in M.FREIGHT_REGIONS:
+        label = region if kind == "freight" else f"{region} · {CORRIDOR_REP_FOB[region]}"
+        spot = _val(region, spot_m, cur_grid, cur_frt)
+        wk = _val(region, spot_m, wk_grid, w_frt)
+        wow = (spot - wk) if (spot is not None and wk is not None
+                              and not pd.isna(spot) and not pd.isna(wk)) else None
+        wow_txt, wow_cls = _chg(wow)
+        fwd_cells = "".join(f"<td>{_lvl(_val(region, m, cur_grid, cur_frt))}</td>"
+                            for m in fwd_ms)
+        avg = avg_map.get(region)
+        vs = (spot - avg) if (spot is not None and avg is not None
+                              and not pd.isna(spot)) else None
+        vs_txt, vs_cls = _chg(vs)
+        body.append(
+            f'<tr><td class="loc">{label}</td>'
+            f'<td>{_lvl(spot)}</td>'
+            f'<td class="{wow_cls}">{wow_txt}</td>'
+            f'{fwd_cells}'
+            f'<td>{_lvl(avg)}</td>'
+            f'<td class="{vs_cls}">{vs_txt}</td></tr>')
+
+    src = "selected date" if cur_is_archived else "working sheet"
     if allow_download:
-        _snap_toolbar("snap_daily_chg", f"Daily CIF Changes {as_of:%m-%d-%y}")
+        _snap_toolbar(snap_id, f"{title.split(' —')[0]} {as_of:%m-%d-%y}")
+    st.markdown(
+        f'<div id="{snap_id}" class="trend-wrap">'
+        f'<div class="trend-title">{title}</div>'
+        f'<table class="trend-tbl">{head}{"".join(body)}</table></div>'
+        f'<div class="trend-foot">Source: JSA River FOB archive ({src}) '
+        f'&middot; 5-Yr Avg = same-season spot over the prior 5 years '
+        f'&middot; as of {as_of:%Y-%m-%d}</div>',
+        unsafe_allow_html=True)
 
-    rows = [hdr("Daily Changes")]
-    rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
-    for c in M.COMMODITIES:
-        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
-                                  (d_cif.get(c) or {}).get(m), "num")
-                        for m in M.MONTHS)
-        rows.append(f'<tr class="strong"><td class="lbl">{c}</td>{cells}</tr>')
-    rows.append(f'<tr class="section"><td colspan="{ncol}">Barge Freight</td></tr>')
-    for r in M.FREIGHT_REGIONS:
-        cells = "".join(_chg_cell((cur_frt.get(r) or {}).get(m),
-                                  (d_frt.get(r) or {}).get(m), "pct")
-                        for m in M.MONTHS)
-        rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
-    st.markdown(f'<div id="snap_daily_chg" class="sheet-wrap">'
-                f'<table class="sheet">{"".join(rows)}</table></div>',
-                unsafe_allow_html=True)
-    st.caption(f"Day-over-day: {cur_lbl} values vs prior archived date "
-               f"({pdaily or 'none'}).")
 
-    # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
-    st.markdown("#### Weekly Changes")
-    if allow_download:
-        _snap_toolbar("snap_weekly_chg", f"Weekly CIF Changes {as_of:%m-%d-%y}")
-
-    rows = [hdr("Weekly Changes")]
-
-    # STL Freight once at the top
-    rows.append(f'<tr class="section"><td colspan="{ncol}">STL Freight</td></tr>')
-    cells = "".join(_chg_cell((cur_frt.get("STL") or {}).get(m),
-                              (w_frt.get("STL") or {}).get(m), "pct")
-                    for m in M.MONTHS)
-    rows.append(f'<tr class="frt-row"><td class="lbl">—</td>{cells}</tr>')
-
-    # CIF and FOB by commodity
-    for c in M.COMMODITIES:
-        rows.append(f'<tr class="section"><td colspan="{ncol}">{c}</td></tr>')
-        cur_fob = M.compute_fob_grid(c, cur_cif.get(c) or {}, cur_frt)["STL"]
-        w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
-                 if w_cif.get(c) else {})
-
-        # CIF
-        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
-                                  (w_cif.get(c) or {}).get(m), "num")
-                        for m in M.MONTHS)
-        rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
-
-        # FOB
-        cells = "".join(_chg_cell(cur_fob.get(m), w_fob.get(m), "num")
-                        for m in M.MONTHS)
-        rows.append(f'<tr class="strong"><td class="lbl">FOB</td>{cells}</tr>')
-
-    st.markdown(f'<div id="snap_weekly_chg" class="sheet-wrap">'
-                f'<table class="sheet">{"".join(rows)}</table></div>',
-                unsafe_allow_html=True)
-    st.caption(f"Week-over-week: {cur_lbl} values vs ~7 days ago "
-               f"({pweek or 'none'}).")
+def render_changes_tab(as_of, cur=None, allow_download=True):
+    """Corridor trends: one filterable table of Spot / WoW change / forward
+    months / 5-year seasonal average per corridor, across barge freight and
+    corn / soybean FOB."""
+    sides = _trend_sides(as_of, cur)
+    metric = st.radio("View", TREND_METRICS, horizontal=True, key="trend_metric",
+                      help="Switch the table between barge freight and corn / "
+                           "soybean FOB — same corridors throughout.")
+    kind = ("freight" if metric == "Barge Freight"
+            else "Corn" if metric == "FOB Corn" else "Soybeans")
+    _corridor_table_block(as_of, sides, kind, "snap_trends", allow_download,
+                          cur is not None)
 
 
 def load_prior(commodity, as_of_iso, cash_c):
@@ -3388,7 +3504,8 @@ if VIEW_ONLY:
         with tabs[-2]:
             render_fob_vessel_tab()
         with tabs[-1]:
-            render_barge_dashboard_tab()
+            render_barge_dashboard_tab(view_date, cur=(hist_cif, hist_frt),
+                                       allow_download=False)
 elif HIST_DATE:
     tabs = st.tabs(["📊 Changes"] + list(M.COMMODITIES)
                    + ["📈 Seasonal", "💵 Cash vs Del", "🛥 River Bids",
@@ -3406,7 +3523,7 @@ elif HIST_DATE:
     with tabs[-2]:
         render_export_tab()
     with tabs[-1]:
-        render_barge_dashboard_tab()
+        render_barge_dashboard_tab(view_date, cur=(hist_cif, hist_frt))
     for tab, commodity in zip(tabs[1:1 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             _render_archived_commodity(commodity)
@@ -3429,7 +3546,7 @@ else:
     with tabs[-2]:
         render_export_tab()
     with tabs[-1]:
-        render_barge_dashboard_tab()
+        render_barge_dashboard_tab(as_of)
     for tab, commodity in zip(tabs[2:2 + len(M.COMMODITIES)], M.COMMODITIES):
         with tab:
             df = st.session_state[f"cif_{commodity}"]
