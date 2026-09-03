@@ -35,6 +35,7 @@ import river_segments as RS
 import delivery_period as DP
 import fob_vessel
 import massive_futures
+import barge_flows as BF
 
 # Local convenience: load a .env if python-dotenv is installed. It's optional —
 # on Streamlit Cloud there is no .env and secrets come from st.secrets (below),
@@ -2786,6 +2787,151 @@ def _fob_sheet_actions(commodity, as_of, hist=None):
 BARGE_DASH_URL = "https://agtransport.usda.gov/stories/s/Barge-Dashboard/965a-yzgy/"
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner="Loading barge-flow history…")
+def _barge_flows_df():
+    """Full USDA downbound grain barge history (weekly, by lock & commodity).
+    Cached 6h — the source updates weekly."""
+    return BF.load_flows()
+
+
+_MONTH_ABBR3 = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def render_barge_flows(allow_download=True):
+    """Downbound grain barge flows through the locks: filterable monthly totals
+    and a year-over-year seasonal view, from USDA AgTransport."""
+    st.markdown("#### 📦 Downbound Grain Barge Flows")
+    st.caption("Grain tonnage moving **downbound** past the river locks toward "
+               "the Gulf — USDA AgTransport, weekly since 2003. (Grain barge "
+               "movement is tracked downbound; northbound is mostly empties.)")
+    try:
+        df = _barge_flows_df()
+    except Exception as e:
+        st.warning(f"USDA barge-flow data is unavailable right now ({e}). "
+                   "The freight trends above and the USDA dashboard below still "
+                   "work.")
+        return
+    if df is None or df.empty:
+        st.info("No barge-flow data available.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    comms = c1.multiselect("Commodity", BF.COMMODITIES, default=BF.COMMODITIES,
+                           key="bf_comm")
+    segs = c2.multiselect("River segment", BF.SEGMENTS, default=BF.SEGMENTS,
+                          key="bf_seg")
+    lock_opts = [l for l in df["lock"].unique() if BF.RIVER_OF_LOCK.get(l) in segs]
+    lock_opts = sorted(lock_opts)
+    # Dependency in the key so the lock picker resets cleanly when segments change.
+    locks = c3.multiselect("Lock", lock_opts, default=lock_opts,
+                           key=f"bf_lock_{'_'.join(sorted(segs)) or 'none'}")
+    if not comms or not locks:
+        st.info("Pick at least one commodity and one lock.")
+        return
+
+    f = df[df["commodity"].isin(comms) & df["lock"].isin(locks)].copy()
+    if f.empty:
+        st.info("No flows for this selection.")
+        return
+    f["mt"] = f["tons"] / 1e6  # million short tons, for readable axes
+
+    # --- Summary: YTD vs prior year vs 5-yr avg, through the latest week ---
+    latest = f["date"].max()
+    cy, cutoff = latest.year, latest.month
+
+    def _ytd(y):
+        return f[(f["year"] == y) & (f["month"] <= cutoff)]["tons"].sum()
+
+    cur = _ytd(cy)
+    prior = _ytd(cy - 1)
+    p5 = [_ytd(cy - k) for k in range(1, 6)]
+    avg5 = sum(p5) / len(p5) if p5 else 0.0
+    a, b, c = st.columns(3)
+    a.metric(f"YTD {cy} (Jan–{latest:%b})", f"{cur / 1e6:,.1f} M tons")
+    b.metric(f"vs {cy - 1} YTD", f"{(cur - prior) / 1e6:+,.1f} M",
+             f"{(cur / prior - 1) * 100:+.0f}%" if prior else "—")
+    c.metric("vs 5-yr avg YTD", f"{(cur - avg5) / 1e6:+,.1f} M",
+             f"{(cur / avg5 - 1) * 100:+.0f}%" if avg5 else "—")
+
+    if allow_download:
+        _snap_toolbar("snap_bargeflow_month", f"Barge Flows Monthly {latest:%m-%d-%y}")
+
+    # --- Monthly flows: stacked bars by commodity over a chosen window ---
+    win = st.radio("Window", ["1 yr", "3 yr", "5 yr", "All"], index=1,
+                   horizontal=True, key="bf_window")
+    monthly = (f.groupby([pd.Grouper(key="date", freq="MS"), "commodity"])["mt"]
+               .sum().reset_index())
+    if win != "All":
+        yrs = int(win.split()[0])
+        monthly = monthly[monthly["date"] >= (latest - pd.DateOffset(years=yrs))]
+    bars = (
+        alt.Chart(monthly, height=300)
+        .mark_bar()
+        .encode(
+            x=alt.X("yearmonth(date):T", title=None),
+            y=alt.Y("sum(mt):Q", title="Million tons",
+                    stack=True),
+            color=alt.Color("commodity:N", title="Commodity",
+                            scale=alt.Scale(domain=BF.COMMODITIES,
+                                            range=["#f2b705", "#2e7d32",
+                                                   "#8d6e63", "#90a4ae"])),
+            tooltip=[alt.Tooltip("yearmonth(date):T", title="Month"),
+                     "commodity:N",
+                     alt.Tooltip("sum(mt):Q", title="M tons", format=",.2f")],
+        )
+        .properties(title="Monthly downbound tonnage")
+    )
+    st.markdown('<div id="snap_bargeflow_month">', unsafe_allow_html=True)
+    st.altair_chart(bars, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- Seasonal: month-of-year overlays by year + a 5-yr average ---
+    if allow_download:
+        _snap_toolbar("snap_bargeflow_seasonal",
+                      f"Barge Flows Seasonal {latest:%m-%d-%y}")
+    seas = f.groupby(["year", "month"])["mt"].sum().reset_index()
+    show_years = sorted(seas["year"].unique())[-6:]              # last 6 + current
+    if cy not in show_years:
+        show_years.append(cy)
+    plot = seas[seas["year"].isin(show_years)].copy()
+    plot["Month"] = plot["month"].map(lambda m: _MONTH_ABBR3[m])
+
+    # 5-yr average by month over the prior 5 complete years.
+    prior_yrs = [cy - k for k in range(1, 6)]
+    avg_df = (seas[seas["year"].isin(prior_yrs)]
+              .groupby("month")["mt"].mean().reset_index())
+    avg_df["Month"] = avg_df["month"].map(lambda m: _MONTH_ABBR3[m])
+
+    month_sort = _MONTH_ABBR3[1:]
+    base_x = alt.X("Month:N", sort=month_sort, title=None)
+    year_lines = (
+        alt.Chart(plot)
+        .mark_line(point=True)
+        .encode(
+            x=base_x,
+            y=alt.Y("mt:Q", title="Million tons"),
+            color=alt.Color("year:N", title="Year",
+                            scale=alt.Scale(scheme="blues")),
+            detail="year:N",
+            tooltip=["year:N", "Month:N",
+                     alt.Tooltip("mt:Q", title="M tons", format=",.2f")],
+        )
+    )
+    avg_line = (
+        alt.Chart(avg_df)
+        .mark_line(strokeDash=[6, 4], color="#c00000", size=2.5)
+        .encode(x=base_x, y="mt:Q",
+                tooltip=[alt.Tooltip("mt:Q", title="5-yr avg M tons",
+                                     format=",.2f")])
+    )
+    st.markdown('<div id="snap_bargeflow_seasonal">', unsafe_allow_html=True)
+    st.altair_chart((year_lines + avg_line).properties(
+        title="Seasonal pattern (dashed red = prior-5-yr average)", height=320),
+        use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_barge_dashboard_tab(as_of, cur=None, allow_download=True):
     """JSA barge-freight corridor trends (same look as the Changes tab) above
     USDA AgTransport's Barge Dashboard, embedded for in-app review. If USDA
@@ -2794,6 +2940,10 @@ def render_barge_dashboard_tab(as_of, cur=None, allow_download=True):
     _corridor_table_block(as_of, _trend_sides(as_of, cur), "freight",
                           "snap_barge_trends", allow_download, cur is not None)
 
+    st.divider()
+    render_barge_flows(allow_download=allow_download)
+
+    st.divider()
     st.markdown("#### 🚢 USDA Barge Dashboard")
     st.markdown(
         '<div class="resource-link">🔗&nbsp;<b>Source:</b> '
