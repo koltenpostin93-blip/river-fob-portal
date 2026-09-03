@@ -2792,81 +2792,71 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
     w_cif, w_frt = w_cif or {}, w_frt or {}
     ncol = len(M.MONTHS) + 1
     banner = "background:linear-gradient(135deg,#0693e3,#32373c)"
-    FOB_LOCS = [it[1] for it in M.BLOCK_LAYOUT if it[0] == "fob"]
 
-    def _month_hdr():
-        return ('<tr class="hdr months"><td class="lbl"></td>'
+    def hdr(title):
+        return (f'<tr><td class="cmdty" colspan="{ncol}" style="{banner}">{title}'
+                f'</td></tr><tr class="hdr months"><td class="lbl"></td>'
                 + "".join(f"<td>{m}</td>" for m in M.MONTHS) + "</tr>")
 
-    def _contract_hdr(commodity):
-        # Contract sublabel under each month (rolls with the as-of month), so a
-        # change is read against the contract it belongs to — like the sheet.
-        cons = M.CONTRACTS.get(commodity) or [None] * len(M.MONTHS)
-        return ('<tr class="hdr"><td class="lbl"></td>'
-                + "".join(f"<td>{c or ''}</td>" for c in cons) + "</tr>")
-
-    def _sect(title, style=None):
-        return (f'<tr><td class="cmdty" colspan="{ncol}" '
-                f'style="{style or banner}">{title}</td></tr>')
-
-    def _freight_section(cmp_frt):
-        # Barge freight is commodity-independent, so it heads the board once.
-        out = [_sect("Barge Freight"), _month_hdr()]
-        band = True
-        for r in M.FREIGHT_REGIONS:
-            cells = "".join(_chg_cell((cur_frt.get(r) or {}).get(m),
-                                      (cmp_frt.get(r) or {}).get(m), "pct")
-                            for m in M.MONTHS)
-            out.append(f'<tr class="frt-row{" band" if band else ""}">'
-                       f'<td class="lbl">{r}</td>{cells}</tr>')
-            band = not band
-        return "".join(out)
-
-    def _commodity_section(commodity, cmp_cif, cmp_frt):
-        # Themed banner + month/contract header, then CIF and an FOB change row
-        # for every river location (not just STL) — the sheet's detail, shown as
-        # day/week moves.
-        c0, c1 = COMMODITY_THEME[commodity]
-        out = [_sect(commodity, f"background:linear-gradient(135deg,{c0},{c1})"),
-               _month_hdr(), _contract_hdr(commodity)]
-        cur_c = cur_cif.get(commodity) or {}
-        cmp_c = cmp_cif.get(commodity) or {}
-        cells = "".join(_chg_cell(cur_c.get(m), cmp_c.get(m), "num")
-                        for m in M.MONTHS)
-        out.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
-        cur_grid = M.compute_fob_grid(commodity, cur_c, cur_frt)
-        cmp_grid = (M.compute_fob_grid(commodity, cmp_c, cmp_frt)
-                    if cmp_c else {})
-        band = True
-        for loc in FOB_LOCS:
-            cells = "".join(_chg_cell((cur_grid.get(loc) or {}).get(m),
-                                      (cmp_grid.get(loc) or {}).get(m), "num")
-                            for m in M.MONTHS)
-            out.append(f'<tr class="{"band" if band else ""}">'
-                       f'<td class="lbl">FOB {loc}</td>{cells}</tr>')
-            band = not band
-        return "".join(out)
-
-    def _board(snap_id, cmp_cif, cmp_frt):
-        rows = [_freight_section(cmp_frt)]
-        rows += [_commodity_section(c, cmp_cif, cmp_frt) for c in M.COMMODITIES]
-        st.markdown(f'<div id="{snap_id}" class="sheet-wrap">'
-                    f'<table class="sheet">{"".join(rows)}</table></div>',
-                    unsafe_allow_html=True)
-
-    # --- Daily: CIF, barge freight, and FOB by location, vs prior day ---
+    # --- Daily: CIF + barge freight, vs prior day ---
     st.markdown("#### Daily Changes")
     if allow_download:
-        _snap_toolbar("snap_daily_chg", f"Daily FOB Changes {as_of:%m-%d-%y}")
-    _board("snap_daily_chg", d_cif, d_frt)
+        _snap_toolbar("snap_daily_chg", f"Daily CIF Changes {as_of:%m-%d-%y}")
+
+    rows = [hdr("Daily Changes")]
+    rows.append(f'<tr class="section"><td colspan="{ncol}">CIF</td></tr>')
+    for c in M.COMMODITIES:
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (d_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">{c}</td>{cells}</tr>')
+    rows.append(f'<tr class="section"><td colspan="{ncol}">Barge Freight</td></tr>')
+    for r in M.FREIGHT_REGIONS:
+        cells = "".join(_chg_cell((cur_frt.get(r) or {}).get(m),
+                                  (d_frt.get(r) or {}).get(m), "pct")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="frt-row"><td class="lbl">{r}</td>{cells}</tr>')
+    st.markdown(f'<div id="snap_daily_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
     st.caption(f"Day-over-day: {cur_lbl} values vs prior archived date "
                f"({pdaily or 'none'}).")
 
-    # --- Weekly: same detail, vs ~1 week ago ---
+    # --- Weekly: CIF / STL freight / STL FOB per commodity, vs ~1 week ago ---
     st.markdown("#### Weekly Changes")
     if allow_download:
-        _snap_toolbar("snap_weekly_chg", f"Weekly FOB Changes {as_of:%m-%d-%y}")
-    _board("snap_weekly_chg", w_cif, w_frt)
+        _snap_toolbar("snap_weekly_chg", f"Weekly CIF Changes {as_of:%m-%d-%y}")
+
+    rows = [hdr("Weekly Changes")]
+
+    # STL Freight once at the top
+    rows.append(f'<tr class="section"><td colspan="{ncol}">STL Freight</td></tr>')
+    cells = "".join(_chg_cell((cur_frt.get("STL") or {}).get(m),
+                              (w_frt.get("STL") or {}).get(m), "pct")
+                    for m in M.MONTHS)
+    rows.append(f'<tr class="frt-row"><td class="lbl">—</td>{cells}</tr>')
+
+    # CIF and FOB by commodity
+    for c in M.COMMODITIES:
+        rows.append(f'<tr class="section"><td colspan="{ncol}">{c}</td></tr>')
+        cur_fob = M.compute_fob_grid(c, cur_cif.get(c) or {}, cur_frt)["STL"]
+        w_fob = (M.compute_fob_grid(c, w_cif.get(c) or {}, w_frt)["STL"]
+                 if w_cif.get(c) else {})
+
+        # CIF
+        cells = "".join(_chg_cell((cur_cif.get(c) or {}).get(m),
+                                  (w_cif.get(c) or {}).get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">CIF</td>{cells}</tr>')
+
+        # FOB
+        cells = "".join(_chg_cell(cur_fob.get(m), w_fob.get(m), "num")
+                        for m in M.MONTHS)
+        rows.append(f'<tr class="strong"><td class="lbl">FOB</td>{cells}</tr>')
+
+    st.markdown(f'<div id="snap_weekly_chg" class="sheet-wrap">'
+                f'<table class="sheet">{"".join(rows)}</table></div>',
+                unsafe_allow_html=True)
     st.caption(f"Week-over-week: {cur_lbl} values vs ~7 days ago "
                f"({pweek or 'none'}).")
 
