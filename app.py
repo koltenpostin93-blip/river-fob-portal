@@ -190,6 +190,17 @@ st.markdown(
         opacity: 0.06; pointer-events: none; z-index: 5;
       }}
 
+      /* External resource callout */
+      .resource-link {{
+        background: rgba(6,147,227,0.06);
+        border: 1px solid #d6e9f7; border-left: 4px solid {JPSI_BLUE};
+        border-radius: 8px; padding: 8px 14px; margin: 2px 0 14px 0;
+        font-size: 0.88rem; color: {JPSI_DARK};
+      }}
+      .resource-link a {{ color: {JPSI_BLUE}; font-weight: 600; text-decoration: none; }}
+      .resource-link a:hover {{ text-decoration: underline; }}
+      .resource-link .rl-sub {{ color: #6b7280; }}
+
       /* Table styling */
       .sheet {{
         width: 100%; border-collapse: collapse; font-size: 0.85rem;
@@ -2823,6 +2834,16 @@ def render_changes_tab(as_of, cur=None, allow_download=True):
         st.markdown(f'<div id="{snap_id}" class="sheet-wrap">'
                     f'<table class="sheet">{"".join(rows)}</table></div>',
                     unsafe_allow_html=True)
+
+    # External resource: USDA's barge dashboard — weekly barge grain movements,
+    # tonnage and rates that sit behind the freight moves shown here.
+    st.markdown(
+        '<div class="resource-link">🔗&nbsp;<b>Resource:</b> '
+        '<a href="https://agtransport.usda.gov/stories/s/Barge-Dashboard/965a-yzgy/" '
+        'target="_blank" rel="noopener">USDA AgTransport — Barge Dashboard</a>'
+        '<span class="rl-sub"> &middot; weekly barge grain movements, tonnage &amp; '
+        'freight rates</span></div>',
+        unsafe_allow_html=True)
 
     # --- Daily: CIF, barge freight, and FOB by location, vs prior day ---
     st.markdown("#### Daily Changes")
