@@ -98,6 +98,21 @@ def _asset_uri(filename):
         return ""
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _live_fed_funds(as_of_iso):
+    """Live front-month fed funds rate and the full-carry interest default it
+    implies (fed funds + 2.25%, the cost-of-carry convention). Returns a dict
+    {ff, rate} or None if the live rate can't be read. Cached hourly — it moves
+    in basis points. Defined early: the Snapshot header uses it at module scope."""
+    try:
+        ff = massive_futures.fed_funds_rate(dt.date.fromisoformat(as_of_iso))
+    except Exception:
+        ff = None
+    if ff is None:
+        return None
+    return {"ff": ff, "rate": round(ff + massive_futures.FED_FUNDS_SPREAD_PCT, 2)}
+
+
 WATERMARK = _asset_uri("jsa_50yr.png")
 LOGO_URI = _asset_uri("logo-full.png")           # JSA wordmark (dark)
 
@@ -2048,21 +2063,6 @@ def _bids_current(since_iso, _schema):
 @st.cache_data(show_spinner=False, ttl=900)
 def _bids_history(grain, since_iso, _schema):
     return bids_data.bid_history(grain, since_iso)
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def _live_fed_funds(as_of_iso):
-    """Live front-month fed funds rate and the full-carry interest default it
-    implies (fed funds + 2.25%, the cost-of-carry convention). Returns a dict
-    {ff, rate} or None if the live rate can't be read. Cached hourly — it moves
-    in basis points."""
-    try:
-        ff = massive_futures.fed_funds_rate(dt.date.fromisoformat(as_of_iso))
-    except Exception:
-        ff = None
-    if ff is None:
-        return None
-    return {"ff": ff, "rate": round(ff + massive_futures.FED_FUNDS_SPREAD_PCT, 2)}
 
 
 def _exp_month_order(m):
