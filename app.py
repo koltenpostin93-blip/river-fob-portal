@@ -52,9 +52,14 @@ except ModuleNotFoundError:
 try:
     for _secret_key in ("DATABASE_URL", "BASIS_DATABASE_URL",
                         "FOB_VESSEL_SERVICE_NAME", "FOB_VESSEL_API_KEY",
-                        "MASSIVE_API_KEY"):
+                        "MASSIVE_API_KEY",
+                        # Snowflake backend (set USE_SNOWFLAKE=1 to cut over)
+                        "USE_SNOWFLAKE", "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER",
+                        "SNOWFLAKE_PASSWORD", "SNOWFLAKE_ROLE",
+                        "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_DATABASE",
+                        "SNOWFLAKE_SCHEMA"):
         if _secret_key in st.secrets and not os.environ.get(_secret_key):
-            os.environ[_secret_key] = st.secrets[_secret_key]
+            os.environ[_secret_key] = str(st.secrets[_secret_key])
 except Exception:
     pass  # st.secrets not available (no secrets configured) — fine locally
 

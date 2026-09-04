@@ -10,6 +10,8 @@ reportlab>=4.0
 openpyxl>=3.1
 # Archive: SQLite is built in (stdlib). For Postgres, set DATABASE_URL and install:
 psycopg2-binary>=2.9
+# Snowflake backend: set USE_SNOWFLAKE=1 + SNOWFLAKE_* creds (see db.py).
+snowflake-connector-python>=3.7
 
 python-dotenv
 vl-convert-python>=1.0

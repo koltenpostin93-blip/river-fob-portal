@@ -31,9 +31,70 @@ def _pg_dsn():
     return url
 
 
+def _use_snowflake():
+    return os.environ.get("USE_SNOWFLAKE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _backend():
+    """Active backend: 'snowflake' | 'postgres' | 'sqlite'. Snowflake wins when
+    USE_SNOWFLAKE is set (even with DATABASE_URL still present), so the cutover
+    is a single flag; otherwise Postgres if DATABASE_URL is set, else SQLite."""
+    if _use_snowflake():
+        return "snowflake"
+    return "postgres" if _is_postgres() else "sqlite"
+
+
+class _SFConn:
+    """Adapts a Snowflake connection to the (conn, placeholder) contract the rest
+    of db.py uses. The default cursor returns tuples — exactly what every read
+    here expects (positional unpacking) — so no dict/lowercase shim is needed."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return self._conn.cursor()
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+
+def _sf_connect():
+    """Fresh Snowflake connection from the SNOWFLAKE_* environment (set locally
+    from .env, on Streamlit Cloud from st.secrets via the app's secret bridge).
+    Forces %s-style binding so the shared SQL works unchanged."""
+    import snowflake.connector as sc
+    kw = dict(
+        account=os.environ["SNOWFLAKE_ACCOUNT"],
+        user=os.environ["SNOWFLAKE_USER"],
+        password=os.environ.get("SNOWFLAKE_PASSWORD") or None,
+        role=os.environ.get("SNOWFLAKE_ROLE") or None,
+        warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE") or None,
+        database=os.environ.get("SNOWFLAKE_DATABASE") or None,
+        schema=os.environ.get("SNOWFLAKE_SCHEMA") or None,
+        login_timeout=30,
+    )
+    conn = sc.connect(**{k: v for k, v in kw.items() if v is not None})
+    try:
+        conn._paramstyle = "pyformat"
+    except Exception:
+        pass
+    return conn
+
+
 def _connect():
     """Return (connection, paramstyle_placeholder)."""
-    if _is_postgres():
+    b = _backend()
+    if b == "snowflake":
+        return _SFConn(_sf_connect()), "%s"
+    if b == "postgres":
         import psycopg2
         return psycopg2.connect(_pg_dsn()), "%s"
     conn = sqlite3.connect(LOCAL_SQLITE)
@@ -41,10 +102,19 @@ def _connect():
 
 
 def backend_name():
-    return "Postgres" if _is_postgres() else f"SQLite ({os.path.basename(LOCAL_SQLITE)})"
+    b = _backend()
+    if b == "snowflake":
+        return "Snowflake"
+    if b == "postgres":
+        return "Postgres"
+    return f"SQLite ({os.path.basename(LOCAL_SQLITE)})"
 
 
 def init_db():
+    # On Snowflake the schema (and data) come from the migration, and CREATE
+    # TABLE IF NOT EXISTS / DDL isn't needed at app start.
+    if _backend() == "snowflake":
+        return
     conn, _ = _connect()
     try:
         cur = conn.cursor()
