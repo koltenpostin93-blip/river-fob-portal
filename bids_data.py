@@ -55,16 +55,24 @@ def _pg_rows(sql, params):
         conn.close()
 
 
+# The bids live in the basis tracker's own Snowflake schema; the FOB archive now
+# has its own database (RIVER_FOB), so the portal's connection defaults there.
+# Point each bids query at the basis tracker's schema explicitly (this connection
+# is used only for bids, so switching its schema is safe).
+BIDS_SCHEMA = "JSA.BASIS_TRACKER"
+
+
 def _sf_rows(sql, params):
-    """Run a bids query on Snowflake. The bids tables share the FOB archive's
-    JSA.BASIS_TRACKER schema, so we reuse the portal's Snowflake connection.
-    Snowflake returns UPPERCASE column names — lowercase them so downstream code
+    """Run a bids query on Snowflake against the basis tracker's schema. We reuse
+    the portal's Snowflake connection but USE the bids schema on it. Snowflake
+    returns UPPERCASE column names — lowercase them so downstream code
     (r['basis_cents'], r['futures_symbol'] …) is unchanged."""
     import db
     import snowflake.connector
     conn = db._sf_connect()
     try:
         cur = conn.cursor(snowflake.connector.DictCursor)
+        cur.execute(f"USE SCHEMA {BIDS_SCHEMA}")
         cur.execute(sql, params)
         return [{k.lower(): v for k, v in r.items()} for r in cur.fetchall()]
     finally:
