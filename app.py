@@ -2104,7 +2104,7 @@ def _decorate(frame):
 
 # Bump when the bid queries change shape, so a warm cache can't serve rows
 # missing newly-selected columns.
-_BIDS_SCHEMA = 2
+_BIDS_SCHEMA = f"3-{bids_data.source_name()}"   # includes source so a backend switch busts the cache
 
 
 @st.cache_data(show_spinner=False, ttl=900)
