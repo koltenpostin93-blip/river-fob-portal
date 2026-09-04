@@ -228,6 +228,7 @@ st.markdown(
       .trend-tbl tr:hover td {{ background: #eef6fc; }}
       .trend-tbl td.pos {{ color: #0d7f3d; font-weight: 700; }}
       .trend-tbl td.neg {{ color: #c00000; font-weight: 700; }}
+      .trend-tbl td.clsd {{ color: #9ca3af; font-style: italic; font-weight: 400; }}
       .trend-foot {{
         font-style: italic; color: #6b7280; font-size: 0.78rem;
         padding: 4px 4px 12px;
@@ -283,6 +284,9 @@ st.markdown(
       }}
       .sheet td.down {{
         background-color: #ffebee; color: #1f2328; font-weight: 700;
+      }}
+      .sheet td.closed {{
+        color: #9ca3af; font-style: italic; font-weight: 400; font-size: 0.78rem;
       }}
       .sheet td.legend {{
         text-align: center; font-size: 0.72rem; color: #555;
@@ -2407,17 +2411,37 @@ def render_riverbids_tab():
 
 
 def _chg_cell(cur, prior, kind):
-    """Cell showing the current value plus its signed change, colored by direction."""
+    """Cell showing the current value plus its signed change, colored by direction.
+
+    For barge freight ('pct') a zero or blank quote means the reach is closed
+    (river frozen, typically the upper river Dec–Mar) — show 'closed' with no
+    value and no change, and never treat a close/re-open as a price move."""
+    if kind == "pct":
+        if cur is None or pd.isna(cur) or cur <= 0:          # closed reach
+            return '<td class="closed">closed</td>'
+        val = f"{cur * 100:.0f}%"
+        # A prior that was closed (0/blank) means this month just re-opened —
+        # show the level but no (spurious) change.
+        if prior is None or pd.isna(prior) or prior <= 0:
+            return f"<td>{val}</td>"
+        d = cur - prior
+        if abs(d) < 1e-9:
+            return f"<td>{val}</td>"
+        cls = "up" if d > 0 else "down"
+        delta = f"{d * 100:+.0f}%"
+        color = "#0d7f3d" if d > 0 else "#c00000"
+        return (f'<td class="{cls}" style="color: {color};">{val}'
+                f'<span class="chg" style="color: {color};"> {delta}</span></td>')
     if cur is None or pd.isna(cur):
         return "<td></td>"
-    val = f"{cur * 100:.0f}%" if kind == "pct" else f"{cur:.2f}"
+    val = f"{cur:.2f}"
     if prior is None or pd.isna(prior):
         return f"<td>{val}</td>"
     d = cur - prior
     if abs(d) < 1e-9:
         return f"<td>{val}</td>"
     cls = "up" if d > 0 else "down"
-    delta = f"{d * 100:+.0f}%" if kind == "pct" else f"{d:+.2f}"
+    delta = f"{d:+.2f}"
     color = "#0d7f3d" if d > 0 else "#c00000"
     return f'<td class="{cls}" style="color: {color};">{val}<span class="chg" style="color: {color};"> {delta}</span></td>'
 
@@ -2997,7 +3021,7 @@ def _corridor_5yr_avg(as_of_iso, kind):
         if kind == "freight":
             for region in M.FREIGHT_REGIONS:
                 v = ((frt or {}).get(region) or {}).get(front)
-                if v is not None:
+                if v is not None and v > 0:      # exclude closed reaches (0/blank)
                     acc[region].append(v)
         else:
             grid = M.compute_fob_grid(kind, (cif or {}).get(kind) or {},
@@ -3059,10 +3083,19 @@ def _corridor_table_block(as_of, sides, kind, snap_id, allow_download,
             return (frt.get(region) or {}).get(m)
         return (grid.get(CORRIDOR_REP_FOB[region]) or {}).get(m) if grid else None
 
+    def _closed(v):
+        # Freight only: a zero or blank quote means the reach is closed (frozen,
+        # typically the upper river Dec–Mar) — not a real 0% tariff.
+        return kind == "freight" and (v is None or pd.isna(v) or v <= 0)
+
     def _lvl(v):
         if v is None or pd.isna(v):
             return "N/A"
         return f"{v * 100:.0f}%" if kind == "freight" else f"{v:.2f}"
+
+    def _cell(v):
+        return ('<td class="clsd">closed</td>' if _closed(v)
+                else f'<td>{_lvl(v)}</td>')
 
     def _chg(d):
         if d is None or pd.isna(d):
@@ -3083,22 +3116,28 @@ def _corridor_table_block(as_of, sides, kind, snap_id, allow_download,
         label = region if kind == "freight" else f"{region} · {CORRIDOR_REP_FOB[region]}"
         spot = _val(region, spot_m, cur_grid, cur_frt)
         wk = _val(region, spot_m, wk_grid, w_frt)
-        wow = (spot - wk) if (spot is not None and wk is not None
-                              and not pd.isna(spot) and not pd.isna(wk)) else None
-        wow_txt, wow_cls = _chg(wow)
-        fwd_cells = "".join(f"<td>{_lvl(_val(region, m, cur_grid, cur_frt))}</td>"
+        spot_td = _cell(spot)
+        # WoW: 'closed' when the reach is closed now; blank when it just re-opened
+        # or a side is missing; otherwise the delta.
+        if _closed(spot):
+            wow_td = '<td class="clsd">closed</td>'
+        elif (_closed(wk) or spot is None or wk is None
+              or pd.isna(spot) or pd.isna(wk)):
+            wow_td = '<td></td>'
+        else:
+            txt, cls = _chg(spot - wk)
+            wow_td = f'<td class="{cls}">{txt}</td>'
+        fwd_cells = "".join(_cell(_val(region, m, cur_grid, cur_frt))
                             for m in fwd_ms)
-        avg = avg_map.get(region)
-        vs = (spot - avg) if (spot is not None and avg is not None
-                              and not pd.isna(spot)) else None
-        vs_txt, vs_cls = _chg(vs)
-        body.append(
-            f'<tr><td class="loc">{label}</td>'
-            f'<td>{_lvl(spot)}</td>'
-            f'<td class="{wow_cls}">{wow_txt}</td>'
-            f'{fwd_cells}'
-            f'<td>{_lvl(avg)}</td>'
-            f'<td class="{vs_cls}">{vs_txt}</td></tr>')
+        avg = avg_map.get(region)            # freight avg already excludes closures
+        avg_td = _cell(avg)
+        if _closed(spot) or avg is None or pd.isna(avg):
+            vs_td = '<td></td>'
+        else:
+            txt, cls = _chg(spot - avg)
+            vs_td = f'<td class="{cls}">{txt}</td>'
+        body.append(f'<tr><td class="loc">{label}</td>{spot_td}{wow_td}'
+                    f'{fwd_cells}{avg_td}{vs_td}</tr>')
 
     src = "selected date" if cur_is_archived else "working sheet"
     if allow_download:
